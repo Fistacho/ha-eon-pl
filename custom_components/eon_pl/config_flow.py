@@ -67,9 +67,11 @@ class EonPolskaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._cookie = cookie
                 self._ku_options = _active_ku_options(ph)
 
-                # 0 active KUs is unusual but valid — finish without filtering.
-                # 1 active KU — no point asking, just create the entry.
-                if len(self._ku_options) <= 1:
+                # 0 active KUs — nothing to ask, just create the entry and let
+                # the coordinator log a warning later. With ≥1 active KU we
+                # always show the selection step so the user explicitly knows
+                # what's being tracked.
+                if not self._ku_options:
                     return self.async_create_entry(
                         title="E.ON Polska",
                         data={CONF_COOKIE: cookie},
@@ -131,13 +133,25 @@ class EonPolskaOptionsFlow(config_entries.OptionsFlow):
         cookie = self._entry.data[CONF_COOKIE]
         client = EonPolskaClient(cookie)
         ku_options: list[selector.SelectOptionDict] = []
+        fetch_error: str | None = None
         try:
             ph = await client.get_ph_list()
             ku_options = _active_ku_options(ph)
-        except Exception:
-            ku_options = []
+        except Exception as exc:  # noqa: BLE001
+            fetch_error = str(exc) or exc.__class__.__name__
         finally:
             await client.aclose()
+
+        if not ku_options:
+            # Empty list means we couldn't fetch KUs (cookie likely expired).
+            # Show an abort screen pointing the user at re-auth instead of an
+            # empty multi-select.
+            return self.async_abort(
+                reason="cannot_fetch_kus",
+                description_placeholders={
+                    "error": fetch_error or "no active KU returned by E.ON",
+                },
+            )
 
         current = self._entry.options.get(CONF_SELECTED_KUS, [])
 
