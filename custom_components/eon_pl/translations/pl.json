@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "E.ON Polska — cookie sesji",
+        "description": "Automatyczne logowanie zablokowane przez reCAPTCHA — wklej cookie sesji ręcznie:\n\n1. Zaloguj się na https://eon.pl/mojeon w przeglądarce\n2. F12 → Application → Cookies → eon.pl\n3. Skopiuj wartość `.AspNet.Cookies`",
+        "data": {
+          "auth_cookie": "Wartość cookie '.AspNet.Cookies'"
+        }
+      }
+    },
+    "error": {
+      "invalid_cookie": "Cookie nieprawidłowe lub wygasłe. Zaloguj się ponownie w przeglądarce i skopiuj świeże `.AspNet.Cookies`.",
+      "cannot_connect": "Nie można połączyć się z eon.pl."
+    },
+    "abort": {
+      "already_configured": "Konto już skonfigurowane.",
+      "reauth_successful": "Sesja odświeżona pomyślnie."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "E.ON Polska — wybór kont umowy",
+        "description": "Zaznacz numery kont umowy (KU), które integracja ma śledzić. Pozostawienie pustego zaznaczenia oznacza wszystkie aktywne konta.",
+        "data": {
+          "selected_kus": "Numery kont umowy"
+        }
+      }
+    }
+  }
+}
