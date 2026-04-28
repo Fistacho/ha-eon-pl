@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "E.ON Polska — logowanie",
+        "description": "Podaj dane do konta Mój E.ON (eon.pl/mojeon).",
+        "data": {
+          "email": "Adres e-mail",
+          "password": "Hasło"
+        }
+      },
+      "cookie": {
+        "title": "E.ON Polska — cookie sesji",
+        "description": "Automatyczne logowanie zablokowane przez reCAPTCHA.\n\nWklej ręcznie wartość cookie `.AspNet.Cookies`:\n1. Zaloguj się na https://eon.pl/mojeon/ w przeglądarce\n2. F12 → Application → Cookies → https://eon.pl\n3. Znajdź `.AspNet.Cookies` → skopiuj całą wartość",
+        "data": {
+          "auth_cookie": "Wartość cookie '.AspNet.Cookies'"
+        }
+      }
+    },
+    "error": {
+      "invalid_credentials": "Nieprawidłowy e-mail lub hasło.",
+      "captcha_required": "reCAPTCHA wymagana — podaj cookie sesji ręcznie (patrz instrukcja poniżej).",
+      "invalid_cookie": "Cookie nieprawidłowe lub wygasłe. Zaloguj się ponownie w przeglądarce i skopiuj świeże `.AspNet.Cookies`.",
+      "cannot_connect": "Nie można połączyć się z eon.pl."
+    },
+    "abort": {
+      "already_configured": "Konto już skonfigurowane.",
+      "reauth_successful": "Sesja odświeżona pomyślnie."
+    }
+  }
+}
