@@ -7,6 +7,13 @@
         "data": {
           "auth_cookie": "Wartość cookie '.AspNet.Cookies'"
         }
+      },
+      "select_kus": {
+        "title": "E.ON Polska — wybór kont umowy",
+        "description": "Twoje konto ma więcej niż jedno aktywne KU (numer konta umowy). Zaznacz te, które integracja ma śledzić — domyślnie zaznaczone wszystkie aktywne.",
+        "data": {
+          "selected_kus": "Numery kont umowy"
+        }
       }
     },
     "error": {
