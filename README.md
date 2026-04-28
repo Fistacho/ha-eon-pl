@@ -61,7 +61,7 @@ Pick whichever of these is easiest:
 ### Via HACS (recommended)
 
 1. HACS → Integrations → ⋮ → **Custom repositories**
-2. Add `https://github.com/fistacho/ha-eon-pl` as **Integration**
+2. Add `https://github.com/Fistacho/ha-eon-pl` as **Integration**
 3. Install **E.ON Polska (Mój E.ON)**
 4. Restart Home Assistant
 5. **Settings → Devices & Services → Add Integration → E.ON Polska**
