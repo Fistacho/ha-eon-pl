@@ -52,6 +52,7 @@ class EonPolskaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=_SCHEMA,
             errors=errors,
+            description_placeholders={"portal_url": "https://eon.pl/mojeon"},
         )
 
     async def async_step_reauth(self, entry_data: dict) -> FlowResult:
