@@ -20,7 +20,6 @@ RUN apk add --no-cache \
         tzdata \
         bash \
         xvfb-run \
-        xorg-server-xvfb \
         mesa-dri-gallium
 
 WORKDIR /opt/eon_pl
