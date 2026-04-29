@@ -1,10 +1,11 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.19
 FROM $BUILD_FROM
 
 ENV LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/usr/lib/playwright
+    CHROMIUM_BIN=/usr/bin/chromium-browser \
+    CHROMEDRIVER_BIN=/usr/bin/chromedriver
 
 RUN apk add --no-cache \
         python3 \
@@ -18,11 +19,6 @@ RUN apk add --no-cache \
         ttf-freefont \
         tzdata \
         bash
-
-# Tell Playwright to use the system chromium instead of downloading its own
-# (Alpine binary works, ~120 MB instead of ~400 MB).
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 WORKDIR /opt/eon_pl
 
