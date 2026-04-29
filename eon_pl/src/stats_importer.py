@@ -1,16 +1,21 @@
-"""Push hourly readings into HA recorder via Supervisor REST API.
+"""Push hourly readings into HA recorder via WebSocket API.
 
-Uses POST /api/services/recorder/import_statistics with the SUPERVISOR_TOKEN
-that HA injects when ``homeassistant_api: true`` is set in addon config.
+The HA recorder exposes `recorder/import_statistics` only on the WebSocket
+API — not as a REST service. The REST `/api/services/recorder/...` endpoint
+returned 400 in v1.1.1/1.1.2 because that service simply isn't registered
+on the REST side. We connect over ws:// using a long-lived access token
+(or SUPERVISOR_TOKEN) and send the import command directly.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
+import aiohttp
 
 from .const import DOMAIN
 from .state_store import StateStore
@@ -18,6 +23,13 @@ from .state_store import StateStore
 # eon.pl publishes hourly readings stamped in Polish local time. Convert to
 # UTC before pushing to HA's recorder, which only accepts UTC timestamps.
 _LOCAL_TZ = ZoneInfo("Europe/Warsaw")
+
+
+def _ws_url(http_url: str) -> str:
+    """Convert an HA HTTP URL to its WebSocket counterpart."""
+    if http_url.startswith("https://"):
+        return "wss://" + http_url[len("https://"):].rstrip("/") + "/api/websocket"
+    return "ws://" + http_url.removeprefix("http://").rstrip("/") + "/api/websocket"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,32 +96,63 @@ class StatsImporter:
         if not stats:
             return
 
-        # The `recorder.import_statistics` REST service does NOT accept the
-        # `name` field that the Python API (async_add_external_statistics)
-        # uses — sending it triggers HTTP 400 schema validation error.
-        # Statistic name is taken from the discovery / device registry.
-        payload = {
-            "statistic_id": statistic_id,
-            "source": DOMAIN,
-            "unit_of_measurement": "kWh",
+        metadata = {
             "has_mean": False,
             "has_sum": True,
-            "stats": stats,
+            "name": name,
+            "source": DOMAIN,
+            "statistic_id": statistic_id,
+            "unit_of_measurement": "kWh",
         }
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(
-                f"{self._url}/api/services/recorder/import_statistics",
-                json=payload,
-                headers={"Authorization": f"Bearer {self._token}"},
-            )
-            if r.status_code >= 400:
-                _LOGGER.warning(
-                    "import_statistics %s failed: HTTP %s — body: %s",
-                    statistic_id, r.status_code, r.text[:500],
-                )
-                return
+        ok, err = await self._ws_import(metadata, stats)
+        if not ok:
+            _LOGGER.warning("import_statistics %s failed: %s", statistic_id, err)
+            return
 
         if latest_ts is not None:
             self._state.update_stats_anchor(statistic_id, running, latest_ts)
         _LOGGER.info("Imported %d rows for %s (running sum=%.3f)",
                      len(stats), statistic_id, running)
+
+    async def _ws_import(
+        self, metadata: dict[str, Any], stats: list[dict[str, Any]]
+    ) -> tuple[bool, str]:
+        """Push one statistic via the WebSocket recorder/import_statistics command."""
+        ws_url = _ws_url(self._url)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(ws_url, timeout=30) as ws:
+                    # Step 1: HA sends auth_required → we reply with the token.
+                    greet = await ws.receive_json(timeout=10)
+                    if greet.get("type") != "auth_required":
+                        return False, f"unexpected greeting: {greet}"
+                    await ws.send_json({"type": "auth", "access_token": self._token})
+                    auth = await ws.receive_json(timeout=10)
+                    if auth.get("type") != "auth_ok":
+                        return False, f"auth failed: {auth}"
+
+                    # Step 2: send the import command.
+                    cmd_id = 1
+                    await ws.send_json({
+                        "id": cmd_id,
+                        "type": "recorder/import_statistics",
+                        "metadata": metadata,
+                        "stats": stats,
+                    })
+
+                    # Wait for the matching result (skip event/feed messages).
+                    while True:
+                        msg = await ws.receive_json(timeout=30)
+                        if msg.get("id") != cmd_id:
+                            continue
+                        if msg.get("type") == "result":
+                            if msg.get("success"):
+                                return True, ""
+                            return False, json.dumps(msg.get("error") or msg)
+                        return False, f"unexpected message: {msg}"
+        except asyncio.TimeoutError:
+            return False, "WebSocket timeout"
+        except aiohttp.ClientError as exc:
+            return False, f"WebSocket connection failed: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"unexpected error: {exc}"
