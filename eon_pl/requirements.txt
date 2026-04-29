@@ -2,5 +2,6 @@ aiohttp>=3.9.0
 aiomqtt>=2.0.0
 httpx>=0.27.0
 selenium>=4.20.0
+selenium-stealth>=1.0.6
 pyyaml>=6.0
 python-dateutil>=2.9.0

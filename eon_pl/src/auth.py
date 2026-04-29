@@ -23,6 +23,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium_stealth import stealth
 
 from .const import COOKIE_NAME, ENDPOINT_LOGIN, PAGE_DASHBOARD
 
@@ -58,7 +59,40 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_experimental_option("useAutomationExtension", False)
 
     service = Service(executable_path=chromedriver_path)
-    return webdriver.Chrome(service=service, options=opts)
+    driver = webdriver.Chrome(service=service, options=opts)
+
+    # Apply selenium-stealth fingerprint masking. This patches:
+    # navigator.webdriver, navigator.languages, navigator.plugins,
+    # WebGL renderer/vendor, screen size etc — enough to bring reCAPTCHA v3
+    # score back into "human" range. Without this eon.pl rejects the login
+    # with "Błąd działania reCaptcha".
+    stealth(
+        driver,
+        languages=["pl-PL", "pl"],
+        vendor="Google Inc.",
+        platform="Win32",
+        webgl_vendor="Intel Inc.",
+        renderer="Intel Iris OpenGL Engine",
+        fix_hairline=True,
+    )
+
+    # Belt-and-braces — explicitly remove navigator.webdriver via CDP. Some
+    # versions of selenium-stealth don't cover this on the very first
+    # document load.
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty(navigator, 'webdriver', "
+                    "{get: () => undefined});"
+                )
+            },
+        )
+    except Exception:
+        pass
+
+    return driver
 
 
 def _login_sync(email: str, password: str, timeout_s: int) -> str:
