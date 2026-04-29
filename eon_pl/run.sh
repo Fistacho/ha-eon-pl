@@ -16,6 +16,11 @@ export EON_DATA_DIR="/data"
 export EON_HA_URL="${SUPERVISOR_TOKEN:+http://supervisor/core}"
 export EON_HA_TOKEN="${SUPERVISOR_TOKEN:-}"
 
+# One-line env diagnostic for the addon log so future "no token" issues are
+# easy to spot without rebuilding the image.
+echo "[run.sh] SUPERVISOR_TOKEN=${SUPERVISOR_TOKEN:+<set>}${SUPERVISOR_TOKEN:-<empty>}" \
+     "HASSIO_TOKEN=${HASSIO_TOKEN:+<set>}${HASSIO_TOKEN:-<empty>}"
+
 cd /opt/eon_pl
 
 # Start Xvfb in the background instead of using xvfb-run, because xvfb-run
