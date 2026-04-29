@@ -103,13 +103,24 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
         pw_el.clear()
         pw_el.send_keys(password)
 
+        # Cookie consent banner (#clb) overlays the submit button. Try to
+        # accept it first; if no button is found, hide the overlay so the
+        # submit click goes through. This is purely a UX overlay — eon.pl
+        # already issued the cookies needed for the form to work.
+        _dismiss_cookie_banner(driver)
+
         # Submit button — type="button", click triggers JS submitForm() which
         # runs reCAPTCHA verification and POSTs to /mojeon/Logowanie.
+        # Use JS click as a belt-and-braces fallback against any remaining
+        # overlay elements that selenium's native click might intercept.
         submit_el = driver.find_element(
             By.CSS_SELECTOR,
             'button[data-test-id="login-button"]',
         )
-        submit_el.click()
+        try:
+            submit_el.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", submit_el)
 
         # Wait for redirect to /mojeon (out of /Logowanie). reCAPTCHA + POST
         # can take 5–15 s, so the timeout matters.
@@ -136,6 +147,41 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
             driver.quit()
         except Exception:
             pass
+
+
+def _dismiss_cookie_banner(driver: Any) -> None:
+    """Best-effort: click an Accept button in the GDPR/cookie banner; if no
+    button is found, hide the overlay container outright."""
+    accept_selectors = (
+        '#clb button[id*="accept" i]',
+        '#clb button[class*="accept" i]',
+        '#clb [data-test-id*="accept" i]',
+        'button#cookie-accept',
+        'button[aria-label*="zgadzam" i]',
+        'button[aria-label*="accept" i]',
+    )
+    for sel in accept_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed():
+                    try:
+                        el.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", el)
+                    _LOGGER.debug("Cookie banner dismissed via %s", sel)
+                    return
+        except Exception:
+            continue
+    # Fallback — just hide the overlay so it can't intercept clicks.
+    try:
+        driver.execute_script(
+            "var b = document.getElementById('clb');"
+            "if (b) { b.style.display = 'none'; b.remove(); }"
+        )
+        _LOGGER.debug("Cookie banner #clb hidden via JS fallback")
+    except Exception:
+        pass
 
 
 def _dump_debug(driver: Any, data_dir: str, tag: str) -> None:
