@@ -12,7 +12,38 @@ cookie_refresh_hours: 12   # co ile godzin re-login (1-24)
 selected_kus: []           # lista KU ID (puste = wszystkie aktywne)
 log_level: info            # debug | info | warning | error
 mqtt_discovery: true       # publikuj encje przez MQTT auto-discovery
+
+# Opcjonalne — używane gdy Protection mode jest WŁĄCZONY i Supervisor nie
+# wstrzykuje tokenu (najczęstszy scenariusz). Wystarczy raz wpisać.
+mqtt_host: ""              # np. "core-mosquitto" lub IP brokera
+mqtt_port: 1883
+mqtt_user: ""              # user MQTT (z Mosquitto addona albo własny)
+mqtt_password: ""
+ha_token: ""               # Long-lived access token z Profile → Security
 ```
+
+### Tryby działania
+
+Addon ma **dwa tryby konfiguracji** w zależności od tego czy Protection mode jest włączony:
+
+**A) Protection mode WYŁĄCZONY** (zalecane, mniej pól do wypełnienia)
+
+- Supervisor wstrzykuje SUPERVISOR_TOKEN automatycznie.
+- Addon pobiera MQTT credentials z Mosquitto addona sam.
+- Pomijasz pola `mqtt_*` i `ha_token` — zostaw puste.
+
+Aby wyłączyć: **Profile → Advanced mode = ON** → **Settings → Add-ons → E.ON Polska → Info** → toggle **Protection mode** → **OFF**.
+
+**B) Protection mode WŁĄCZONY** (domyślne, bezpieczniejsze)
+
+- Wpisujesz **ręcznie** dane MQTT brokera + Long-lived access token HA.
+- Działa bez modyfikacji systemowych ustawień.
+
+Pola wymagane:
+
+- `mqtt_host` — adres brokera (Mosquitto addon: `core-mosquitto`, lub IP)
+- `mqtt_user`, `mqtt_password` — z konfiguracji Mosquitto / Twojego brokera
+- `ha_token` — wygeneruj w **HA Profile → Security → Long-Lived Access Tokens → Create Token**, skopiuj wartość
 
 ### email
 

@@ -44,6 +44,16 @@ class MqttConfig:
             password=d.get("password") or None,
         )
 
+    @classmethod
+    def from_options(cls, host: str, port: int, user: str, password: str) -> "MqttConfig":
+        """Build config from addon options (used when Supervisor token is unavailable)."""
+        return cls(
+            host=host,
+            port=int(port or 1883),
+            username=user or None,
+            password=password or None,
+        )
+
 
 # ---------- Discovery + state ----------
 

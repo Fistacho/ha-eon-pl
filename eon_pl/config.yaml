@@ -1,5 +1,5 @@
 name: E.ON Polska
-version: "1.0.9"
+version: "1.1.0"
 slug: eon_pl
 description: "Automatyczne pobieranie zużycia energii z Mój E.ON do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
 url: https://github.com/Fistacho/ha-eon-pl
@@ -24,6 +24,11 @@ options:
   selected_kus: []
   log_level: info
   mqtt_discovery: true
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  ha_token: ""
 
 schema:
   email: email
@@ -34,6 +39,11 @@ schema:
     - str
   log_level: list(debug|info|warning|error)
   mqtt_discovery: bool
+  mqtt_host: str?
+  mqtt_port: int(1,65535)
+  mqtt_user: str?
+  mqtt_password: password?
+  ha_token: password?
 
 ports:
   8099/tcp: 8099

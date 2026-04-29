@@ -18,6 +18,14 @@ class AddonOptions:
     selected_kus: list[str] = field(default_factory=list)
     log_level: str = "info"
     mqtt_discovery: bool = True
+    # Manual overrides — used when Supervisor doesn't inject SUPERVISOR_TOKEN
+    # (Protection mode kept ON, etc.). Fields are optional; empty string means
+    # "fall back to Supervisor".
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_password: str = ""
+    ha_token: str = ""
 
     @classmethod
     def load(cls, path: str | None = None) -> "AddonOptions":
@@ -32,6 +40,11 @@ class AddonOptions:
             selected_kus=[str(x) for x in raw.get("selected_kus", []) or []],
             log_level=str(raw.get("log_level", "info")).lower(),
             mqtt_discovery=bool(raw.get("mqtt_discovery", True)),
+            mqtt_host=str(raw.get("mqtt_host", "")).strip(),
+            mqtt_port=int(raw.get("mqtt_port", 1883) or 1883),
+            mqtt_user=str(raw.get("mqtt_user", "")).strip(),
+            mqtt_password=str(raw.get("mqtt_password", "")),
+            ha_token=str(raw.get("ha_token", "")).strip(),
         )
 
 

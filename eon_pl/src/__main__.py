@@ -133,16 +133,53 @@ class App:
             selected_kus=self.rt.options.selected_kus,
             relogin=self.relogin,
         )
-        self.stats = StatsImporter(self.rt.ha_url, self.rt.ha_token, self.state_store)
+        # Statistics importer — prefer user-provided long-lived token, fall
+        # back to Supervisor token if it was injected.
+        if self.rt.options.ha_token:
+            stats_url = "http://homeassistant:8123"
+            stats_token = self.rt.options.ha_token
+            _LOGGER.info("Stats importer using user-provided long-lived token")
+        else:
+            stats_url = self.rt.ha_url
+            stats_token = self.rt.ha_token
+            if not stats_token:
+                _LOGGER.warning(
+                    "Stats importer has no token — set ha_token in addon options "
+                    "(Profile → Security → Long-Lived Access Tokens)"
+                )
+        self.stats = StatsImporter(stats_url, stats_token, self.state_store)
 
-        # Connect MQTT (only if discovery enabled and broker reachable)
+        # Connect MQTT (only if discovery enabled and broker reachable). Try
+        # user-supplied broker creds first; if missing, fall back to
+        # Supervisor's auto-injected MQTT service info.
         if self.rt.options.mqtt_discovery:
-            try:
-                cfg = await MqttConfig.from_supervisor()
-                self.mqtt = await MqttPublisher(cfg).__aenter__()
-                _LOGGER.info("MQTT connected: %s:%s", cfg.host, cfg.port)
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning("MQTT unavailable (%s) — skipping discovery", exc)
+            cfg: MqttConfig | None = None
+            if self.rt.options.mqtt_host:
+                cfg = MqttConfig.from_options(
+                    self.rt.options.mqtt_host,
+                    self.rt.options.mqtt_port,
+                    self.rt.options.mqtt_user,
+                    self.rt.options.mqtt_password,
+                )
+                _LOGGER.info("MQTT using addon options (host=%s port=%s)",
+                             cfg.host, cfg.port)
+            else:
+                try:
+                    cfg = await MqttConfig.from_supervisor()
+                    _LOGGER.info("MQTT using Supervisor service (host=%s)", cfg.host)
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "MQTT unavailable (%s) — set mqtt_host/user/password "
+                        "in addon options to use a broker manually", exc,
+                    )
+
+            if cfg is not None:
+                try:
+                    self.mqtt = await MqttPublisher(cfg).__aenter__()
+                    _LOGGER.info("MQTT connected: %s:%s", cfg.host, cfg.port)
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning("MQTT connection failed: %s", exc)
+                    self.mqtt = None
 
         # First fetch
         try:
