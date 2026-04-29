@@ -21,9 +21,10 @@ COOKIE_NAME = ".AspNet.Cookies"
 
 DOMAIN = "eon_pl"
 
-# Recorder publishes hourly readings with a 24-48h delay; bumped to -3 to be
-# safely past the publication boundary regardless of time-of-day.
-HOURLY_DATE_OFFSET_DAYS = 3
+# eon.pl publishes hourly readings with a 24-48h delay. We aim for today-2;
+# if a chunk including the last day comes back as a 302 (data not yet
+# published) the per-chunk retry will still surface earlier days.
+HOURLY_DATE_OFFSET_DAYS = 2
 STATS_REPORT_MAX_DAYS = 60
 STATS_BACKFILL_FROM_YEAR_START = True
 STATS_BACKFILL_DAYS_FALLBACK = 30
