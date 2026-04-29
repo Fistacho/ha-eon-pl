@@ -17,9 +17,14 @@ export EON_HA_URL="${SUPERVISOR_TOKEN:+http://supervisor/core}"
 export EON_HA_TOKEN="${SUPERVISOR_TOKEN:-}"
 
 # One-line env diagnostic for the addon log so future "no token" issues are
-# easy to spot without rebuilding the image.
+# easy to spot without rebuilding the image. Lists everything Supervisor
+# auto-injects that we might consume.
 echo "[run.sh] SUPERVISOR_TOKEN=${SUPERVISOR_TOKEN:+<set>}${SUPERVISOR_TOKEN:-<empty>}" \
-     "HASSIO_TOKEN=${HASSIO_TOKEN:+<set>}${HASSIO_TOKEN:-<empty>}"
+     "HASSIO_TOKEN=${HASSIO_TOKEN:+<set>}${HASSIO_TOKEN:-<empty>}" \
+     "MQTT_HOST=${MQTT_HOST:-<empty>}" \
+     "MQTT_PORT=${MQTT_PORT:-<empty>}" \
+     "MQTT_USERNAME=${MQTT_USERNAME:-<empty>}" \
+     "MQTT_PASSWORD=${MQTT_PASSWORD:+<set>}${MQTT_PASSWORD:-<empty>}"
 
 cd /opt/eon_pl
 

@@ -149,9 +149,12 @@ class App:
                 )
         self.stats = StatsImporter(stats_url, stats_token, self.state_store)
 
-        # Connect MQTT (only if discovery enabled and broker reachable). Try
-        # user-supplied broker creds first; if missing, fall back to
-        # Supervisor's auto-injected MQTT service info.
+        # Connect MQTT (only if discovery enabled and broker reachable).
+        # Resolution order:
+        #   1. addon options (mqtt_host) — explicit user choice
+        #   2. Supervisor-injected env vars (MQTT_HOST etc.) — works without
+        #      SUPERVISOR_TOKEN, so it's the "automatic" path
+        #   3. Supervisor REST /services/mqtt — needs SUPERVISOR_TOKEN
         if self.rt.options.mqtt_discovery:
             cfg: MqttConfig | None = None
             if self.rt.options.mqtt_host:
@@ -164,14 +167,18 @@ class App:
                 _LOGGER.info("MQTT using addon options (host=%s port=%s)",
                              cfg.host, cfg.port)
             else:
-                try:
-                    cfg = await MqttConfig.from_supervisor()
-                    _LOGGER.info("MQTT using Supervisor service (host=%s)", cfg.host)
-                except Exception as exc:  # noqa: BLE001
-                    _LOGGER.warning(
-                        "MQTT unavailable (%s) — set mqtt_host/user/password "
-                        "in addon options to use a broker manually", exc,
-                    )
+                cfg = MqttConfig.from_env()
+                if cfg is not None:
+                    _LOGGER.info("MQTT using Supervisor env vars (host=%s)", cfg.host)
+                else:
+                    try:
+                        cfg = await MqttConfig.from_supervisor()
+                        _LOGGER.info("MQTT using Supervisor service (host=%s)", cfg.host)
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "MQTT unavailable (%s) — set mqtt_host/user/password "
+                            "in addon options to use a broker manually", exc,
+                        )
 
             if cfg is not None:
                 try:

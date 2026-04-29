@@ -26,6 +26,24 @@ class MqttConfig:
     password: str | None
 
     @classmethod
+    def from_env(cls) -> "MqttConfig | None":
+        """Try Supervisor's auto-injected MQTT env vars (no token required).
+
+        For addons with `services: [mqtt:want]` Supervisor sets MQTT_HOST,
+        MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD before launching the
+        container — works even with Protection mode ON.
+        """
+        host = os.environ.get("MQTT_HOST", "").strip()
+        if not host:
+            return None
+        return cls(
+            host=host,
+            port=int(os.environ.get("MQTT_PORT", "1883") or 1883),
+            username=os.environ.get("MQTT_USERNAME") or None,
+            password=os.environ.get("MQTT_PASSWORD") or None,
+        )
+
+    @classmethod
     async def from_supervisor(cls) -> "MqttConfig":
         token = os.environ.get("SUPERVISOR_TOKEN")
         if not token:
