@@ -1,6 +1,7 @@
 """Tiny aiohttp web UI exposed via Home Assistant ingress."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -8,6 +9,13 @@ from typing import Any, Awaitable, Callable
 from aiohttp import web
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _run_safely(fn: Callable[[], Awaitable[None]], label: str) -> None:
+    try:
+        await fn()
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.exception("%s failed: %s", label, exc)
 
 
 def build_app(
@@ -49,18 +57,16 @@ def build_app(
         return web.Response(text=body, content_type="text/html")
 
     async def post_relogin(_req: web.Request) -> web.Response:
-        try:
-            await trigger_login()
-            return web.json_response({"status": "ok"})
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"status": "error", "message": str(exc)}, status=500)
+        # Fire-and-forget: Playwright login takes 30–90 s, longer than HA's
+        # Ingress proxy is willing to keep the response open. Run it in the
+        # background and return immediately — the user reloads the page to
+        # see the new "Last login" timestamp.
+        asyncio.create_task(_run_safely(trigger_login, "relogin"))
+        return web.json_response({"status": "ok", "started": True})
 
     async def post_refetch(_req: web.Request) -> web.Response:
-        try:
-            await trigger_fetch()
-            return web.json_response({"status": "ok"})
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"status": "error", "message": str(exc)}, status=500)
+        asyncio.create_task(_run_safely(trigger_fetch, "refetch"))
+        return web.json_response({"status": "ok", "started": True})
 
     async def health(_req: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
@@ -124,14 +130,15 @@ def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, con
 <script>
 async function post(url, btn) {{
   btn.disabled = true; const orig = btn.textContent;
-  btn.textContent = 'Pracuję…';
+  btn.textContent = 'Uruchamiam…';
   try {{
-    const r = await fetch(url, {{method:'POST'}});
-    const j = await r.json();
-    btn.textContent = j.status === 'ok' ? 'OK' : ('Błąd: ' + j.message);
-    setTimeout(() => location.reload(), 1500);
+    const r = await fetch(url, {{method:'POST', headers:{{'Accept':'application/json'}}}});
+    const text = await r.text();
+    let j; try {{ j = JSON.parse(text); }} catch {{ j = {{status: 'ok'}}; }}
+    btn.textContent = j.status === 'ok' ? 'Zlecone — odśwież za chwilę' : ('Błąd: ' + (j.message||''));
+    setTimeout(() => location.reload(), 4000);
   }} catch (e) {{ btn.textContent = 'Błąd: ' + e; }}
-  finally {{ setTimeout(() => {{ btn.disabled = false; btn.textContent = orig; }}, 3000); }}
+  finally {{ setTimeout(() => {{ btn.disabled = false; btn.textContent = orig; }}, 6000); }}
 }}
 </script>
 </body></html>"""
