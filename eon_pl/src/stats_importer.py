@@ -8,11 +8,16 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from .const import DOMAIN
 from .state_store import StateStore
+
+# eon.pl publishes hourly readings stamped in Polish local time. Convert to
+# UTC before pushing to HA's recorder, which only accepts UTC timestamps.
+_LOCAL_TZ = ZoneInfo("Europe/Warsaw")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,7 +60,7 @@ class StatsImporter:
     async def _import_one(
         self,
         statistic_id: str,
-        name: str,
+        name: str,  # kept for API compat / log labeling, not sent in payload
         rows: list[dict[str, Any]],
         value_key: str,
     ) -> None:
@@ -65,21 +70,27 @@ class StatsImporter:
         latest_ts: datetime | None = None
         for r in rows:
             ts: datetime = r["timestamp"]
+            # CSV timestamps from eon.pl are bare local Polish time. Localize
+            # to Europe/Warsaw, then convert to UTC for the recorder.
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if last_start is not None and ts <= last_start:
+                ts = ts.replace(tzinfo=_LOCAL_TZ)
+            ts_utc = ts.astimezone(timezone.utc)
+            if last_start is not None and ts_utc <= last_start:
                 continue
             v = float(r.get(value_key) or 0.0)
             running += v
-            stats.append({"start": ts.isoformat(), "state": v, "sum": running})
-            latest_ts = ts
+            stats.append({"start": ts_utc.isoformat(), "state": v, "sum": running})
+            latest_ts = ts_utc
         if not stats:
             return
 
+        # The `recorder.import_statistics` REST service does NOT accept the
+        # `name` field that the Python API (async_add_external_statistics)
+        # uses — sending it triggers HTTP 400 schema validation error.
+        # Statistic name is taken from the discovery / device registry.
         payload = {
             "statistic_id": statistic_id,
             "source": DOMAIN,
-            "name": name,
             "unit_of_measurement": "kWh",
             "has_mean": False,
             "has_sum": True,
@@ -93,8 +104,8 @@ class StatsImporter:
             )
             if r.status_code >= 400:
                 _LOGGER.warning(
-                    "import_statistics %s failed: HTTP %s %s",
-                    statistic_id, r.status_code, r.text[:200],
+                    "import_statistics %s failed: HTTP %s — body: %s",
+                    statistic_id, r.status_code, r.text[:500],
                 )
                 return
 
