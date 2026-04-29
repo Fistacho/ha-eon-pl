@@ -17,9 +17,14 @@ export EON_HA_URL="${SUPERVISOR_TOKEN:+http://supervisor/core}"
 export EON_HA_TOKEN="${SUPERVISOR_TOKEN:-}"
 
 cd /opt/eon_pl
-# xvfb-run starts a virtual X server (display :99) so chromium can run in
-# non-headless mode. reCAPTCHA v3 detects --headless=new fingerprints with
-# very high accuracy; running on Xvfb gives a "real desktop" fingerprint
-# while still being completely automatable.
-exec xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
-    python3 -m src
+
+# Start Xvfb in the background instead of using xvfb-run, because xvfb-run
+# wipes some env vars before exec — SUPERVISOR_TOKEN was being lost, which
+# broke MQTT discovery and statistics import. Running Xvfb manually keeps
+# the addon's full env intact.
+Xvfb :99 -screen 0 1366x768x24 -nolisten tcp >/dev/null 2>&1 &
+export DISPLAY=:99
+# Tiny delay so Xvfb is ready before chromium tries to connect.
+sleep 1
+
+exec python3 -m src
