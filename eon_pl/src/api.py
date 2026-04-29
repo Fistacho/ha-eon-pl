@@ -1,4 +1,7 @@
-"""E.ON Polska API client — session-cookie based."""
+"""E.ON Polska API client — session-cookie based (addon edition).
+
+Adapted from the legacy custom_component. HA-specific imports removed.
+"""
 from __future__ import annotations
 
 import csv
@@ -9,38 +12,21 @@ from typing import Any
 
 import httpx
 
-try:
-    from .const import (
-        API_BASE,
-        BASE_URL,
-        COOKIE_NAME,
-        ENDPOINT_BILLING,
-        ENDPOINT_KEEPALIVE,
-        ENDPOINT_METER_READINGS,
-        ENDPOINT_OZE_AGR,
-        ENDPOINT_OZE_DETAILS,
-        ENDPOINT_OZE_REPORT,
-        ENDPOINT_PH_LIST,
-        OZE_REPORT_ITEM_ID,
-        PAGE_DASHBOARD,
-        PAGE_HISTORIA_ZUZYCIA,
-    )
-except ImportError:
-    from eon_pl_const import (  # type: ignore[no-redef]
-        API_BASE,
-        BASE_URL,
-        COOKIE_NAME,
-        ENDPOINT_BILLING,
-        ENDPOINT_KEEPALIVE,
-        ENDPOINT_METER_READINGS,
-        ENDPOINT_OZE_AGR,
-        ENDPOINT_OZE_DETAILS,
-        ENDPOINT_OZE_REPORT,
-        ENDPOINT_PH_LIST,
-        OZE_REPORT_ITEM_ID,
-        PAGE_DASHBOARD,
-        PAGE_HISTORIA_ZUZYCIA,
-    )
+from .const import (
+    API_BASE,
+    BASE_URL,
+    COOKIE_NAME,
+    ENDPOINT_BILLING,
+    ENDPOINT_KEEPALIVE,
+    ENDPOINT_METER_READINGS,
+    ENDPOINT_OZE_AGR,
+    ENDPOINT_OZE_DETAILS,
+    ENDPOINT_OZE_REPORT,
+    ENDPOINT_PH_LIST,
+    OZE_REPORT_ITEM_ID,
+    PAGE_DASHBOARD,
+    PAGE_HISTORIA_ZUZYCIA,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +54,6 @@ class EonApiError(Exception):
 
 
 def _parse_pl_number(s: str) -> float:
-    """Parse Polish-formatted number: '1 234,56' -> 1234.56. Empty -> 0.0."""
     s = (s or "").strip().replace("\xa0", "").replace(" ", "")
     if not s:
         return 0.0
@@ -79,17 +64,8 @@ def _parse_pl_number(s: str) -> float:
         return 0.0
 
 
-def _parse_oze_csv(raw: bytes) -> list[dict[str, Any]]:
-    """Parse OZE report CSV. Returns list of {timestamp, imported, exported, balance}.
-
-    CSV columns (semicolon or comma separated):
-      Dzień odczytu, Godzina odczytu, Energia pobrana, status danych,
-      Energia wprowadzona, status danych, Bilans energii, status danych,
-      Energia zbilansowana ujemna 15 min
-
-    Hour values are 01:00..24:00 where 24:00 means end of day (00:00 next day).
-    Timestamp returned represents the START of the hour (00:00..23:00 local time).
-    """
+def parse_oze_csv(raw: bytes) -> list[dict[str, Any]]:
+    """Parse OZE report CSV → [{timestamp, imported_kwh, exported_kwh, balance_kwh}]."""
     text = raw.decode("utf-8-sig", errors="replace")
     sample = text[:4096]
     try:
@@ -112,7 +88,6 @@ def _parse_oze_csv(raw: bytes) -> list[dict[str, Any]]:
         try:
             d = datetime.strptime(date_str, "%d.%m.%Y").date()
             hour_end = int(hour_str.split(":")[0])
-            # Hour range 1..24: each row represents [hour-1, hour). Stamp at hour-1.
             hour_start = hour_end - 1
             ts = datetime.combine(d, datetime.min.time()) + timedelta(hours=hour_start)
         except (ValueError, IndexError):
@@ -120,14 +95,12 @@ def _parse_oze_csv(raw: bytes) -> list[dict[str, Any]]:
         imported = _parse_pl_number(row[2])
         exported = _parse_pl_number(row[4])
         balance = _parse_pl_number(row[6]) if len(row) > 6 else (imported - exported)
-        out.append(
-            {
-                "timestamp": ts,
-                "imported_kwh": imported,
-                "exported_kwh": exported,
-                "balance_kwh": balance,
-            }
-        )
+        out.append({
+            "timestamp": ts,
+            "imported_kwh": imported,
+            "exported_kwh": exported,
+            "balance_kwh": balance,
+        })
     return out
 
 
@@ -136,34 +109,16 @@ class EonPolskaClient:
 
     def __init__(self, auth_cookie: str) -> None:
         self._auth_cookie = auth_cookie
-        # Persistent client (built off-loop on first use to avoid blocking the
-        # event loop on SSL certificate loading).
         self._client: httpx.AsyncClient | None = None
-
-    def _build_client(self) -> httpx.AsyncClient:
-        """Build a httpx.AsyncClient. Run via executor (loads SSL certs sync)."""
-        return httpx.AsyncClient(
-            headers=_API_HEADERS,
-            cookies={COOKIE_NAME: self._auth_cookie},
-            follow_redirects=False,
-            timeout=30,
-        )
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            try:
-                import asyncio
-                loop = asyncio.get_running_loop()
-                self._client = await loop.run_in_executor(None, self._build_client)
-            except RuntimeError:
-                # Not inside an event loop — build directly (e.g. CLI tests).
-                self._client = self._build_client()
-        return self._client
-
-    def _get_client(self) -> httpx.AsyncClient:
-        """Synchronous fallback; only safe outside the event loop."""
-        if self._client is None or self._client.is_closed:
-            self._client = self._build_client()
+            self._client = httpx.AsyncClient(
+                headers=_API_HEADERS,
+                cookies={COOKIE_NAME: self._auth_cookie},
+                follow_redirects=False,
+                timeout=30,
+            )
         return self._client
 
     async def aclose(self) -> None:
@@ -172,23 +127,24 @@ class EonPolskaClient:
 
     @property
     def auth_cookie(self) -> str:
-        """Return the latest .AspNet.Cookies value (server may rotate it)."""
         if self._client is not None:
             cur = self._client.cookies.get(COOKIE_NAME)
             if cur:
                 return cur
         return self._auth_cookie
 
+    def set_cookie(self, cookie: str) -> None:
+        """Replace the in-flight cookie (e.g. after Playwright re-login)."""
+        self._auth_cookie = cookie
+        if self._client is not None and not self._client.is_closed:
+            self._client.cookies.set(COOKIE_NAME, cookie, domain="eon.pl")
+
     def _check_auth(self, r: httpx.Response, url: str) -> None:
         if r.status_code in (301, 302, 303, 307, 308):
             location = r.headers.get("location", "")
             low = location.lower()
             if "logowanie" in low:
-                raise EonAuthError("Session expired — paste a fresh '.AspNet.Cookies'")
-            # Sitecore endpoints (GenerateOzeReport, etc.) redirect to a portal
-            # page like /mojeon/Historia-zuzycia when the Sitecore session is
-            # not warmed up. Treat that as a recoverable auth-like error so the
-            # caller can retry after a keepalive/page-warmup.
+                raise EonAuthError("Session expired — re-login required")
             if "/mojeon/" in low:
                 raise EonAuthError(
                     f"Sitecore session needs warmup (redirected to {location})"
@@ -209,17 +165,6 @@ class EonPolskaClient:
             raise EonApiError(f"Non-JSON response from {url}: {r.text[:200]}") from exc
 
     async def keepalive(self) -> bool:
-        """Keep the session alive — and resurrect a dropped Sitecore session.
-
-        Three-step flow:
-          1. /api/keepalive — pings the API session.
-          2. /mojeon (dashboard) — *resurrects* the portal/Sitecore session.
-             This is the magic page: even when /Historia-zuzycia would 302 to
-             /Logowanie, hitting /mojeon first reactivates the portal session
-             using just .AspNet.Cookies, after which /api/sitecore/* works.
-          3. /Historia-zuzycia — primes the specific Sitecore route used by
-             GenerateOzeReport.
-        """
         page_headers = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
         try:
             client = await self._ensure_client()
@@ -237,7 +182,7 @@ class EonPolskaClient:
     async def validate_session(self) -> bool:
         try:
             data = await self._get(ENDPOINT_PH_LIST)
-            return data.get("Partners") is not None
+            return bool(data.get("Partners"))
         except (EonAuthError, EonApiError):
             return False
 
@@ -279,12 +224,6 @@ class EonPolskaClient:
         date_from: date,
         date_to: date,
     ) -> list[dict[str, Any]]:
-        """Fetch hourly energy readings for a date range as parsed CSV rows.
-
-        eon.pl limits a single report to 180 days. Hours are returned as the
-        START of each hourly bucket (local time), with imported/exported/balance
-        in kWh.
-        """
         if (date_to - date_from).days > 180:
             raise EonApiError("Date range exceeds 180 days (eon.pl limit)")
 
@@ -308,9 +247,8 @@ class EonPolskaClient:
 
         ctype = (r.headers.get("content-type") or "").lower()
         if "text/html" in ctype:
-            # Sitecore returns the login page as HTML when session is half-dead.
             raise EonAuthError("OzeReport returned HTML — session needs refresh")
-        return _parse_oze_csv(r.content)
+        return parse_oze_csv(r.content)
 
     async def get_payments(self, report_type: str = "reports") -> dict[str, Any]:
         return await self._get(f"{API_BASE}/getpaymentsdata", type=report_type)

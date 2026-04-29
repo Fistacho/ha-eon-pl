@@ -1,133 +1,124 @@
-# E.ON Polska (Mój E.ON) — Home Assistant integration
+# E.ON Polska — Home Assistant Add-on
 
-Custom integration for [Mój E.ON](https://eon.pl/mojeon) — Polish energy distributor portal.
-Pulls hourly meter readings (import/export) plus billing/OZE summaries and feeds the
-Energy Dashboard with full year-to-date statistics.
+Automatyczne pobieranie zużycia energii z **Mój E.ON** do Home Assistant. Login `email + hasło` raz w configu addona — reszta dzieje się sama.
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 ![iot_class](https://img.shields.io/badge/iot_class-cloud_polling-blue)
+![type](https://img.shields.io/badge/type-HA_Add--on-green)
 
-## What it does
+## Co robi
 
-- **Hourly imported / exported energy** from your bidirectional smart meter,
-  pushed to Home Assistant **external statistics** (visible in the Energy Dashboard).
-- **Year-to-date backfill** on first run — chunks of 60 days, ~5s total.
-- **Live "last hour" sensors** (`pobrana / wprowadzona / bilans ostatnia godzina`).
-- **Yearly totals** from OZE aggregate API: `pobrana / wprowadzona / bilans (bieżący rok)`.
-- **Current billing-period consumption** from billing chart data.
-- Self-healing **Sitecore session keepalive** every 10 min using a `/mojeon` "resurrect"
-  pattern — no manual re-login under normal use.
+- **Logowanie automatyczne** — Playwright + chromium odpalane on-demand (~30 s peak), reCAPTCHA v3 przechodzi naturalnie.
+- **Hourly imported / exported** → Home Assistant **external statistics** (Energy Dashboard).
+- **Year-to-date backfill** przy pierwszym uruchomieniu (chunki 60 dni).
+- **Live "ostatnia godzina"** sensors (`pobrana / wprowadzona / bilans`).
+- **Roczne agregaty** + **bieżący okres rozliczeniowy** z `GetBillingData` / `GetOzeAgrData`.
+- **MQTT auto-discovery** — encje pojawiają się w HA same.
+- **Web UI ingress** — status sesji, ostatni login, ręczny refresh.
+- Self-healing: keepalive co 5 min, automatyczne re-login co 12 h lub przy 302 do `/Logowanie`.
 
-E.ON Polska publishes hourly readings with a ~24–48 h delay, so the most recent
-data point is always 1–2 days behind.
+## Wymagania
 
-## Setup at a glance
+- Home Assistant OS / Supervised z dostępem do Add-on Store
+- **MQTT broker** (np. addon Mosquitto) — addon korzysta z auto-discovery
+- Konto na <https://eon.pl/mojeon>
 
-| Where | What you provide |
-| --- | --- |
-| eon.pl portal | Log in once in your browser |
-| DevTools → Application → Cookies → eon.pl | Copy value of `.AspNet.Cookies` |
-| HA → Settings → Devices & Services → Add `E.ON Polska` | Paste the cookie |
+## Instalacja
 
-The integration takes it from there. No password is stored — just the session cookie.
+1. **Settings → Add-ons → Add-on Store → ⋮ → Repositories**
+2. Dodaj: `https://github.com/Fistacho/ha-eon-pl`
+3. Zainstaluj **E.ON Polska**
+4. **Configuration**:
 
-### Three ways to grab the cookie
+   ```yaml
+   email: twoj@email.pl
+   password: TwojeHasło
+   scan_interval_hours: 6
+   cookie_refresh_hours: 12
+   selected_kus: []          # puste = wszystkie aktywne KU
+   log_level: info
+   mqtt_discovery: true
+   ```
 
-The cookie has the `HttpOnly` flag, so JavaScript bookmarklets can't read it.
-Pick whichever of these is easiest:
+5. **Start**
+6. **Open Web UI** — zobacz status, kliknij "Pobierz dane teraz" jeśli chcesz przyspieszyć pierwszy fetch.
 
-**1. DevTools → Application** (manual, no extras)
+Encje pojawiają się w HA przez MQTT auto-discovery w ciągu kilku sekund po pierwszym fetchu.
 
-- Log in at <https://eon.pl/mojeon> → F12 → **Application** tab → **Cookies → eon.pl**
-- Click `.AspNet.Cookies` → copy "Value"
+## Encje (per KU+PPE)
 
-**2. DevTools → Network** (works in any browser)
-
-- Log in → F12 → **Network** tab → filter "mojeon"
-- Click any request → **Headers → Request Headers → cookie**
-- The string `.AspNet.Cookies=<value>;` is in there — copy `<value>`
-
-**3. "Cookie-Editor" extension** (one-click)
-
-- Install [Cookie-Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm) for Chrome / Firefox
-- On eon.pl: open the extension → click `.AspNet.Cookies` → "Copy value"
-
-> **Why not auto-login?** eon.pl uses Google reCAPTCHA v3 with a strict score threshold.
-> No realistic way to pass it from a Python HTTP client without a real browser. Manual
-> cookie + 10-min keepalive keeps the session alive effectively forever in practice.
-
-## Installation
-
-### Via HACS (recommended)
-
-1. HACS → Integrations → ⋮ → **Custom repositories**
-2. Add `https://github.com/Fistacho/ha-eon-pl` as **Integration**
-3. Install **E.ON Polska (Mój E.ON)**
-4. Restart Home Assistant
-5. **Settings → Devices & Services → Add Integration → E.ON Polska**
-
-### Manual
-
-Copy `custom_components/eon_pl/` into your HA `config/custom_components/` directory,
-restart HA, then add the integration from the UI.
-
-## Entities
-
-For each active contract account (KU) + connection point (PPE):
-
-| Entity | Type | Source |
+| Encja | Typ | Źródło |
 | --- | --- | --- |
-| `sensor.e_on_<KU>_<PPE>_zuzycie_biezacy_okres_rozliczeniowy` | total_increasing kWh | `GetBillingData` |
-| `sensor.e_on_<KU>_<PPE>_pobrana_biezacy_rok` | total_increasing kWh | `GetOzeAgrData` (annual) |
-| `sensor.e_on_<KU>_<PPE>_wprowadzona_biezacy_rok` | total_increasing kWh | `GetOzeAgrData` (annual) |
-| `sensor.e_on_<KU>_<PPE>_bilans_biezacy_rok` | total kWh | `GetOzeAgrData` (annual) |
-| `sensor.e_on_<KU>_<PPE>_pobrana_ostatnia_godzina` | total kWh | hourly CSV |
-| `sensor.e_on_<KU>_<PPE>_wprowadzona_ostatnia_godzina` | total kWh | hourly CSV |
-| `sensor.e_on_<KU>_<PPE>_bilans_ostatnia_godzina` | total kWh | hourly CSV |
+| `sensor.eon_<key>_consumption_current_period` | total_increasing kWh | `GetBillingData` |
+| `sensor.eon_<key>_imported_year` | total_increasing kWh | `GetOzeAgrData` |
+| `sensor.eon_<key>_exported_year` | total_increasing kWh | `GetOzeAgrData` |
+| `sensor.eon_<key>_balance_year` | total kWh | `GetOzeAgrData` |
+| `sensor.eon_<key>_last_hour_imported` | total kWh | hourly CSV |
+| `sensor.eon_<key>_last_hour_exported` | total kWh | hourly CSV |
+| `sensor.eon_<key>_last_hour_balance` | total kWh | hourly CSV |
 
-Plus **external statistics** (don't appear as entities, only in the Energy Dashboard):
+Plus **external statistics** (Energy Dashboard):
 
-- `eon_pl:imported_<PPE>` — hourly cumulative import sum
-- `eon_pl:exported_<PPE>` — hourly cumulative export sum
+- `eon_pl:imported_<PPE>` — godzinowy kumulowany pobór
+- `eon_pl:exported_<PPE>` — godzinowy kumulowany eksport
 
 ## Energy Dashboard
 
-`Settings → Dashboards → Energy`:
+**Settings → Dashboards → Energy**:
 
 - **Electricity grid → Add consumption** → `eon_pl:imported_<PPE>`
 - **Electricity grid → Add return** → `eon_pl:exported_<PPE>`
-- **Solar panels → Add solar production** → your inverter total (e.g. `sensor.total_yield`
-  from the Huawei Solar integration)
+- **Solar panels → Add solar production** → encja Twojego inwertera
 
-HA computes self-consumption, self-sufficiency and home usage automatically.
+## Architektura
 
-## Multiple contracts (KUs)
+```text
+┌──────────────────────────────────────────┐
+│ HA Add-on container                       │
+│                                            │
+│ ┌──────────┐  ┌─────────────────┐         │
+│ │ Web UI   │  │ Main loop        │         │
+│ │ (ingress)│  │  - keepalive 5min │         │
+│ └─────┬────┘  │  - fetch every Nh │         │
+│       │       │  - relogin every Nh│        │
+│       └──────►│  - on-demand login │        │
+│               └────┬─────────┬─────┘         │
+│                    ▼         ▼               │
+│          ┌──────────────┐  ┌─────────────┐  │
+│          │ Playwright + │  │ httpx async │  │
+│          │ chromium     │  │ → eon.pl    │  │
+│          │ (on-demand)  │  └─────────────┘  │
+│          └──────────────┘                    │
+│                              │               │
+│       ┌──────────────────────┴────┐          │
+│       ▼                           ▼          │
+│  ┌─────────┐              ┌──────────┐       │
+│  │  MQTT   │ → discovery  │ HA REST  │       │
+│  │ pub     │   + state    │ recorder │       │
+│  └─────────┘              │ statistics│      │
+│                           └──────────┘       │
+└──────────────────────────────────────────────┘
+```
 
-eon.pl groups energy contracts under "Konto umowy" (KU). If your account has
-more than one active KU, the integration creates sensors for **all of them**
-by default. To narrow it down:
+**RAM profile:**
 
-**Settings → Devices & Services → E.ON Polska → Configure** → pick which KU(s)
-to track from the list. Leave empty to keep tracking all active ones.
+- Idle: ~30 MB (sam Python + httpx + aiomqtt)
+- Login peak: ~500 MB przez ~30 s (chromium), potem zwolniony
+- Średnio: ~30 MB
 
-Closed/inactive KUs (`IsActive=False` in the API) are always skipped.
+## Migracja z `custom_components/eon_pl`
 
-## Cookie expiry
+Stary HACS-ready custom_component (v0.1–v0.2) został zarchiwizowany w git history (tag `v0.2.1`). Addon to kompletny rewrite:
 
-The `.AspNet.Cookies` value is long-lived (weeks to months). The portal-side
-Sitecore session is short — but the integration refreshes it every 10 minutes
-via a `/mojeon` page hit, which silently reactivates a dropped session.
+- Stare encje `sensor.e_on_*` z entity_registry można bezpiecznie usunąć (Settings → Devices & Services → ⋮ → Entities → filter `e_on`).
+- Stare `eon_pl:imported_<PPE>` external statistics **zostają w recorderze** — addon wznawia od ostatniej znanej sumy, żadnych dziur w Energy Dashboard.
+- W configu HA **nie** trzeba nic dodawać — addon publikuje wszystko przez MQTT discovery.
 
-If the auth cookie itself expires you'll get a `Reauthentication required` notification.
-Re-paste a fresh cookie in **Devices & Services → E.ON Polska → Configure**.
+## Limitacje
 
-## Limitations
-
-- Hourly data has a **24–48 h publishing delay**. The integration uses
-  `today − 2` as the upper bound to avoid 302 redirects.
-- No automatic login (reCAPTCHA v3, see above).
-- Not affiliated with E.ON Polska. Use at your own risk.
+- Hourly data ma **24–48 h opóźnienia publikacji**. Addon używa `today − 3` jako górnej granicy okna.
+- Wymaga MQTT brokera w HA.
+- Nieafiliowany z E.ON Polska. Korzystasz na własne ryzyko.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT — patrz [LICENSE](./LICENSE).
