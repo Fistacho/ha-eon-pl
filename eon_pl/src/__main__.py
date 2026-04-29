@@ -65,7 +65,7 @@ class App:
     async def relogin(self) -> str:
         """Always launches Playwright. Saves the new cookie."""
         async with self._login_lock:
-            _LOGGER.info("Launching Playwright login...")
+            _LOGGER.info("Launching Selenium login...")
             cookie = await login_with_retry(
                 self.rt.options.email, self.rt.options.password
             )

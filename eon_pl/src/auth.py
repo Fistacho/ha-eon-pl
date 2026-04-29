@@ -71,6 +71,8 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
     except WebDriverException as exc:
         raise LoginError(f"Failed to launch chromium: {exc}") from exc
 
+    debug_dir = os.environ.get("EON_DATA_DIR", "/data")
+
     try:
         _LOGGER.info("Selenium: navigating to %s", ENDPOINT_LOGIN)
         driver.set_page_load_timeout(timeout_s)
@@ -78,37 +80,48 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
 
         wait = WebDriverWait(driver, timeout_s)
 
-        # Email + password fields. Selectors derived from inspecting eon.pl;
-        # if E.ON changes the form, this is the place to update.
-        email_el = wait.until(EC.presence_of_element_located((
-            By.CSS_SELECTOR,
-            'input[name="Email"], input[type="email"], input[id*="mail" i]',
-        )))
+        # Email field — eon.pl uses name="UserName" (not "Email").
+        try:
+            email_el = wait.until(EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                'input#UserName, input[name="UserName"]',
+            )))
+        except TimeoutException as exc:
+            _dump_debug(driver, debug_dir, "email_field_missing")
+            raise LoginError(
+                f"Email field not found within {timeout_s}s — "
+                f"login page may have changed (debug saved to {debug_dir})"
+            ) from exc
+
         email_el.clear()
         email_el.send_keys(email)
 
         pw_el = driver.find_element(
             By.CSS_SELECTOR,
-            'input[name="Password"], input[type="password"]',
+            'input#Password, input[name="Password"]',
         )
         pw_el.clear()
         pw_el.send_keys(password)
 
+        # Submit button — type="button", click triggers JS submitForm() which
+        # runs reCAPTCHA verification and POSTs to /mojeon/Logowanie.
         submit_el = driver.find_element(
             By.CSS_SELECTOR,
-            'button[type="submit"], input[type="submit"]',
+            'button[data-test-id="login-button"]',
         )
         submit_el.click()
 
-        # Wait for redirect to dashboard (out of /Logowanie)
+        # Wait for redirect to /mojeon (out of /Logowanie). reCAPTCHA + POST
+        # can take 5–15 s, so the timeout matters.
         try:
             wait.until(lambda d: PAGE_DASHBOARD in d.current_url and
                        "Logowanie" not in d.current_url)
         except TimeoutException as exc:
-            snippet = driver.page_source[:500]
+            _dump_debug(driver, debug_dir, "no_redirect_after_submit")
+            err_text = _try_capture_error(driver)
             raise LoginError(
                 f"Login did not redirect to dashboard within {timeout_s}s. "
-                f"Page: {snippet}"
+                f"Page error: {err_text}"
             ) from exc
 
         for c in driver.get_cookies():
@@ -125,7 +138,38 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
             pass
 
 
-async def selenium_login(email: str, password: str, *, timeout_s: int = 60) -> str:
+def _dump_debug(driver: Any, data_dir: str, tag: str) -> None:
+    """Save page HTML + screenshot to /data for post-mortem inspection."""
+    try:
+        html_path = os.path.join(data_dir, f"login_debug_{tag}.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        png_path = os.path.join(data_dir, f"login_debug_{tag}.png")
+        driver.save_screenshot(png_path)
+        _LOGGER.warning("Login debug dumped to %s and %s", html_path, png_path)
+    except Exception as exc:
+        _LOGGER.debug("Debug dump failed: %s", exc)
+
+
+def _try_capture_error(driver: Any) -> str:
+    """Read any visible validation message from the form."""
+    try:
+        for sel in (
+            ".validation-msg",
+            ".validation-msg-recaptcha",
+            "#recaptcha-error-banner",
+            ".form-validation-msg",
+        ):
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                txt = (el.text or "").strip()
+                if txt:
+                    return txt
+    except Exception:
+        pass
+    return f"current URL: {driver.current_url}"
+
+
+async def selenium_login(email: str, password: str, *, timeout_s: int = 90) -> str:
     """Async wrapper. Runs blocking Selenium calls in a thread."""
     return await asyncio.to_thread(_login_sync, email, password, timeout_s)
 
