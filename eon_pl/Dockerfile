@@ -18,7 +18,9 @@ RUN apk add --no-cache \
         ca-certificates \
         ttf-freefont \
         tzdata \
-        bash
+        bash \
+        xvfb-run \
+        mesa-dri-gallium
 
 WORKDIR /opt/eon_pl
 

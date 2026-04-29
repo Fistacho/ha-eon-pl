@@ -44,10 +44,11 @@ def _build_driver() -> webdriver.Chrome:
 
     opts = Options()
     opts.binary_location = chromium_path
-    opts.add_argument("--headless=new")
+    # No --headless: we run on Xvfb (DISPLAY=:99 set by xvfb-run wrapper).
+    # reCAPTCHA v3 scores --headless=new fingerprints very low; non-headless
+    # on a virtual X server scores roughly the same as a real desktop browser.
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--window-size=1366,768")
     opts.add_argument("--lang=pl-PL")

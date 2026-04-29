@@ -17,4 +17,9 @@ export EON_HA_URL="${SUPERVISOR_TOKEN:+http://supervisor/core}"
 export EON_HA_TOKEN="${SUPERVISOR_TOKEN:-}"
 
 cd /opt/eon_pl
-exec python3 -m src
+# xvfb-run starts a virtual X server (display :99) so chromium can run in
+# non-headless mode. reCAPTCHA v3 detects --headless=new fingerprints with
+# very high accuracy; running on Xvfb gives a "real desktop" fingerprint
+# while still being completely automatable.
+exec xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
+    python3 -m src
