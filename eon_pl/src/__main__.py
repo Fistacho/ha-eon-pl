@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
-from .api import EonPolskaClient
+from .api import EonAuthError, EonPolskaClient
 from .auth import LoginError, login_with_retry
 from .config import Runtime, configure_logging
 from .const import KEEPALIVE_INTERVAL_MINUTES
@@ -93,10 +93,25 @@ class App:
                 self.state_store.record_fetch(datetime.now(timezone.utc), ok)
 
     async def loop_keepalive(self) -> None:
+        _auth_fails = 0
         while True:
             try:
                 if self.coordinator:
                     await self.coordinator.keepalive()
+                    _auth_fails = 0
+            except EonAuthError as exc:
+                _auth_fails += 1
+                _LOGGER.warning("keepalive: session expired (%s) — fail #%d", exc, _auth_fails)
+                if _auth_fails >= 3:
+                    _LOGGER.warning("keepalive: 3 consecutive auth failures — emergency re-login")
+                    try:
+                        cookie = await self.relogin()
+                        if self.client is not None:
+                            self.client.set_cookie(cookie)
+                        _auth_fails = 0
+                        await self.fetch_once()
+                    except Exception as rel_exc:  # noqa: BLE001
+                        _LOGGER.error("keepalive: emergency re-login failed: %s", rel_exc)
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug("keepalive error: %s", exc)
             await asyncio.sleep(KEEPALIVE_INTERVAL_MINUTES * 60)

@@ -171,11 +171,18 @@ class EonPolskaClient:
             r1 = await client.get(ENDPOINT_KEEPALIVE)
             r2 = await client.get(PAGE_DASHBOARD, headers=page_headers)
             r3 = await client.get(PAGE_HISTORIA_ZUZYCIA, headers=page_headers)
+            for resp in (r2, r3):
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location", "").lower()
+                    if "logowanie" in loc:
+                        raise EonAuthError("Session expired — keepalive redirect to login")
             return (
                 r1.status_code == 200
-                and r2.status_code == 200
-                and r3.status_code == 200
+                and r2.status_code in (200, 302, 301)
+                and r3.status_code in (200, 302, 301)
             )
+        except EonAuthError:
+            raise
         except Exception:
             return False
 

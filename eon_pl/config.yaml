@@ -1,5 +1,5 @@
 name: E.ON Polska
-version: "1.1.4"
+version: "1.1.5"
 slug: eon_pl
 description: "Automatyczne pobieranie zużycia energii z Mój E.ON do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
 url: https://github.com/Fistacho/ha-eon-pl

@@ -148,7 +148,8 @@ class EonCoordinator:
 
     async def _fetch_hourly(self, ku_id: str, ppe_id: str) -> list[dict[str, Any]]:
         """Fetch hourly readings for one PPE in chunks ≤ STATS_REPORT_MAX_DAYS days."""
-        date_from, date_to = self._stats_window(ppe_id)
+        key = f"{ku_id}_{ppe_id}"
+        date_from, date_to = self._stats_window(key)
         if date_from > date_to:
             return []
 
@@ -163,7 +164,7 @@ class EonCoordinator:
             cur_from = cur_to + timedelta(days=1)
         if rows:
             rows.sort(key=lambda r: r["timestamp"])
-            self._last_anchor[f"{ku_id}_{ppe_id}"] = rows[-1]["timestamp"]
+            self._last_anchor[key] = rows[-1]["timestamp"]
         return rows
 
     async def _fetch_chunk_with_retry(
@@ -191,11 +192,11 @@ class EonCoordinator:
                 return None
         return None
 
-    def _stats_window(self, ppe_id: str) -> tuple[date, date]:
+    def _stats_window(self, key: str) -> tuple[date, date]:
         today = date.today()
         date_to = today - timedelta(days=HOURLY_DATE_OFFSET_DAYS)
 
-        anchor = self._last_anchor.get(ppe_id)
+        anchor = self._last_anchor.get(key)
         if anchor is not None:
             return anchor.date() - timedelta(days=3), date_to
 
