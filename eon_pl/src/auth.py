@@ -94,6 +94,11 @@ def _build_driver() -> webdriver.Chrome:
     # Chromium 120+ on containers without D-Bus hangs waiting for the system
     # keyring; --password-store=basic bypasses the keyring entirely.
     opts.add_argument("--password-store=basic")
+    # Force X11 backend — newer Chromium (120+) auto-detects Wayland if
+    # XDG_SESSION_TYPE=wayland is set (can be inherited from the host via
+    # Supervisor env injection). Without Wayland running in the container,
+    # Chromium hangs indefinitely waiting for the compositor.
+    opts.add_argument("--ozone-platform=x11")
     opts.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
@@ -101,7 +106,9 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
 
-    service = Service(executable_path=chromedriver_path)
+    debug_dir = os.environ.get("EON_DATA_DIR", "/data")
+    log_path = os.path.join(debug_dir, "chromedriver.log")
+    service = Service(executable_path=chromedriver_path, log_output=log_path)
     driver = webdriver.Chrome(service=service, options=opts)
 
     # Apply selenium-stealth fingerprint masking. This patches:
