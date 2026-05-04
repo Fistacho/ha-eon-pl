@@ -28,6 +28,11 @@ echo "[run.sh] SUPERVISOR_TOKEN=${SUPERVISOR_TOKEN:+<set>}${SUPERVISOR_TOKEN:-<e
 
 cd /opt/eon_pl
 
+# s6-overlay restarts this script within the same container on crash, so /tmp
+# is NOT cleaned between restarts. Remove stale X lock files left by the
+# previous run; without this, Xvfb fails to bind :99 and Chromium hangs.
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+
 # Start Xvfb in the background instead of using xvfb-run, because xvfb-run
 # wipes some env vars before exec — SUPERVISOR_TOKEN was being lost, which
 # broke MQTT discovery and statistics import. Running Xvfb manually keeps
@@ -35,6 +40,6 @@ cd /opt/eon_pl
 Xvfb :99 -screen 0 1366x768x24 -nolisten tcp >/dev/null 2>&1 &
 export DISPLAY=:99
 # Tiny delay so Xvfb is ready before chromium tries to connect.
-sleep 1
+sleep 2
 
 exec python3 -m src
