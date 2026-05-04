@@ -12,6 +12,7 @@ RUN apk add --no-cache \
         py3-pip \
         chromium \
         chromium-chromedriver \
+        chromium-swiftshader \
         nss \
         freetype \
         harfbuzz \

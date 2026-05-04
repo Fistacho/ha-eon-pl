@@ -96,13 +96,14 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_argument("--password-store=basic")
     # Force X11 backend regardless of XDG_SESSION_TYPE inherited from host.
     opts.add_argument("--ozone-platform=x11")
-    # GPU process crashes in this HA addon container regardless of GL flags
-    # (no /dev/dri, restricted kernel capabilities). --disable-gpu prevents the
-    # GPU subprocess from spawning and eliminates the IPC deadlock.
-    # SwiftShader (via --use-gl=swiftshader) keeps WebGL alive so reCAPTCHA v3
-    # gets a valid context; selenium-stealth masks the renderer strings on top.
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--use-gl=swiftshader")
+    # Use ANGLE+SwiftShader — the proper Chrome GPU path for containers.
+    # Requires chromium-swiftshader package (libvk_swiftshader.so) which is a
+    # separate Alpine split package NOT included with plain `chromium`.
+    # Without it --use-angle=swiftshader crashes the GPU process; with it the
+    # GPU process initialises cleanly, WebGL works, and canvas/WebGL fingerprint
+    # matches a real desktop browser (better reCAPTCHA v3 score than --disable-gpu).
+    opts.add_argument("--use-gl=angle")
+    opts.add_argument("--use-angle=swiftshader")
     opts.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
