@@ -122,9 +122,15 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
     if not email or not password:
         raise LoginError("Empty email or password — set them in addon options")
 
+    display = os.environ.get("DISPLAY", "")
+    if display:
+        socket_path = f"/tmp/.X11-unix/X{display.lstrip(':')}"
+        if not os.path.exists(socket_path):
+            _LOGGER.warning("X socket %s missing — Xvfb not running on %s", socket_path, display)
+
     try:
         driver = _build_driver()
-    except WebDriverException as exc:
+    except Exception as exc:
         raise LoginError(f"Failed to launch chromium: {exc}") from exc
 
     debug_dir = os.environ.get("EON_DATA_DIR", "/data")
