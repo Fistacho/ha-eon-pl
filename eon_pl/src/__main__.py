@@ -93,25 +93,43 @@ class App:
                 self.state_store.record_fetch(datetime.now(timezone.utc), ok)
 
     async def loop_keepalive(self) -> None:
+        import time as _time
         _auth_fails = 0
+        _relogin_backoff = 0  # seconds; 0 = not yet failed
+        _next_relogin_at = 0.0
         while True:
             try:
                 if self.coordinator:
                     await self.coordinator.keepalive()
+                    if _auth_fails:
+                        _LOGGER.info("keepalive: session restored")
                     _auth_fails = 0
+                    _relogin_backoff = 0
+                    _next_relogin_at = 0.0
             except EonAuthError as exc:
                 _auth_fails += 1
                 _LOGGER.warning("keepalive: session expired (%s) — fail #%d", exc, _auth_fails)
-                if _auth_fails >= 3:
-                    _LOGGER.warning("keepalive: 3 consecutive auth failures — emergency re-login")
+                if _auth_fails >= 3 and _time.monotonic() >= _next_relogin_at:
+                    _LOGGER.warning(
+                        "keepalive: triggering re-login (backoff was %.0f min)",
+                        _relogin_backoff / 60,
+                    )
                     try:
                         cookie = await self.relogin()
                         if self.client is not None:
                             self.client.set_cookie(cookie)
                         _auth_fails = 0
+                        _relogin_backoff = 0
+                        _next_relogin_at = 0.0
                         await self.fetch_once()
                     except Exception as rel_exc:  # noqa: BLE001
-                        _LOGGER.error("keepalive: emergency re-login failed: %s", rel_exc)
+                        # Exponential backoff: 15 min → 30 → 60 → 120 → 240 max
+                        _relogin_backoff = min(max(_relogin_backoff * 2, 15 * 60), 4 * 3600)
+                        _next_relogin_at = _time.monotonic() + _relogin_backoff
+                        _LOGGER.error(
+                            "keepalive: re-login failed: %s. Next attempt in %.0f min",
+                            rel_exc, _relogin_backoff / 60,
+                        )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug("keepalive error: %s", exc)
             await asyncio.sleep(KEEPALIVE_INTERVAL_MINUTES * 60)

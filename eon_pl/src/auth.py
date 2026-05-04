@@ -14,12 +14,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
+import re
+import subprocess
+import time
 from typing import Any
 
 from selenium import webdriver
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -34,6 +39,19 @@ class LoginError(Exception):
     """Login attempt failed."""
 
 
+def _detect_chromium_version(chromium_path: str) -> str:
+    """Return installed Chromium version (e.g. '131.0.6778.139')."""
+    try:
+        r = subprocess.run(
+            [chromium_path, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)", r.stdout)
+        return m.group(1) if m else "131.0.0.0"
+    except Exception:
+        return "131.0.0.0"
+
+
 def _build_driver() -> webdriver.Chrome:
     chromium_path = os.environ.get(
         "CHROMIUM_BIN", "/usr/bin/chromium-browser"
@@ -41,6 +59,9 @@ def _build_driver() -> webdriver.Chrome:
     chromedriver_path = os.environ.get(
         "CHROMEDRIVER_BIN", "/usr/bin/chromedriver"
     )
+
+    version = _detect_chromium_version(chromium_path)
+    _LOGGER.debug("Chromium version: %s", version)
 
     opts = Options()
     opts.binary_location = chromium_path
@@ -53,8 +74,8 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_argument("--window-size=1366,768")
     opts.add_argument("--lang=pl-PL")
     opts.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
     )
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
@@ -113,6 +134,9 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
         driver.set_page_load_timeout(timeout_s)
         driver.get(ENDPOINT_LOGIN)
 
+        # Brief pause — let reCAPTCHA v3 observe page load before we interact.
+        time.sleep(random.uniform(2.5, 4.5))
+
         wait = WebDriverWait(driver, timeout_s)
 
         # Email field — eon.pl uses name="UserName" (not "Email").
@@ -128,15 +152,30 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
                 f"login page may have changed (debug saved to {debug_dir})"
             ) from exc
 
+        # Move cursor to field before clicking — looks more human.
+        ActionChains(driver).move_to_element(email_el).pause(
+            random.uniform(0.3, 0.7)
+        ).click().perform()
         email_el.clear()
-        email_el.send_keys(email)
+        for ch in email:
+            email_el.send_keys(ch)
+            time.sleep(random.uniform(0.05, 0.13))
+
+        time.sleep(random.uniform(0.3, 0.7))
 
         pw_el = driver.find_element(
             By.CSS_SELECTOR,
             'input#Password, input[name="Password"]',
         )
+        ActionChains(driver).move_to_element(pw_el).pause(
+            random.uniform(0.2, 0.5)
+        ).click().perform()
         pw_el.clear()
-        pw_el.send_keys(password)
+        for ch in password:
+            pw_el.send_keys(ch)
+            time.sleep(random.uniform(0.05, 0.13))
+
+        time.sleep(random.uniform(0.8, 1.8))
 
         # Cookie consent banner (#clb) overlays the submit button. Try to
         # accept it first; if no button is found, hide the overlay so the
@@ -146,12 +185,13 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
 
         # Submit button — type="button", click triggers JS submitForm() which
         # runs reCAPTCHA verification and POSTs to /mojeon/Logowanie.
-        # Use JS click as a belt-and-braces fallback against any remaining
-        # overlay elements that selenium's native click might intercept.
         submit_el = driver.find_element(
             By.CSS_SELECTOR,
             'button[data-test-id="login-button"]',
         )
+        ActionChains(driver).move_to_element(submit_el).pause(
+            random.uniform(0.3, 0.6)
+        ).perform()
         try:
             submit_el.click()
         except Exception:
