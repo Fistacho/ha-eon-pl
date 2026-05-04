@@ -28,6 +28,13 @@ echo "[run.sh] SUPERVISOR_TOKEN=${SUPERVISOR_TOKEN:+<set>}${SUPERVISOR_TOKEN:-<e
 
 cd /opt/eon_pl
 
+# Force Mesa software rasterizer (llvmpipe) for all GL calls so Chromium's
+# GPU process can initialise without a real DRI device in the container.
+# This gives a normal GPU-path canvas fingerprint (better reCAPTCHA score)
+# while still working fully in a headless Docker/LXC environment.
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
+
 # s6-overlay restarts this script within the same container on crash, so /tmp
 # is NOT cleaned between restarts. Remove stale X lock/socket files left by
 # the previous run; without this, Xvfb fails to bind :99 and Chromium hangs.
