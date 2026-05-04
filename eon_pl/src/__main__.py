@@ -159,7 +159,15 @@ class App:
 
     async def run(self) -> None:
         _LOGGER.info("E.ON Polska addon starting...")
-        cookie = await self.ensure_cookie()
+        cookie = ""
+        try:
+            cookie = await self.ensure_cookie()
+        except LoginError as exc:
+            _LOGGER.error(
+                "Initial login failed: %s — starting in degraded mode, "
+                "keepalive will retry automatically.",
+                exc,
+            )
         self.client = EonPolskaClient(cookie)
         self.coordinator = EonCoordinator(
             client=self.client,
@@ -221,11 +229,14 @@ class App:
                     _LOGGER.warning("MQTT connection failed: %s", exc)
                     self.mqtt = None
 
-        # First fetch
-        try:
-            await self.fetch_once()
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.exception("Initial fetch failed: %s", exc)
+        # First fetch — skip if no valid session yet (degraded mode)
+        if cookie:
+            try:
+                await self.fetch_once()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.exception("Initial fetch failed: %s", exc)
+        else:
+            _LOGGER.warning("Skipping initial fetch — no valid session, waiting for keepalive re-login")
 
         # Web UI
         app = build_app(
