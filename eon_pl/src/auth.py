@@ -96,13 +96,15 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_argument("--password-store=basic")
     # Force X11 backend regardless of XDG_SESSION_TYPE inherited from host.
     opts.add_argument("--ozone-platform=x11")
-    # Disable hardware GPU — the GPU subprocess crashes in Docker/LXC
-    # containers (no DRI device, restricted kernel caps), causing Chromium's
-    # main process to deadlock waiting for GPU IPC → 120 s ReadTimeoutError.
-    # SwiftShader keeps WebGL alive via CPU so reCAPTCHA v3 gets a valid
-    # context; selenium-stealth then masks the renderer strings.
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--use-gl=swiftshader")
+    # Use ANGLE with SwiftShader backend — this is how Chrome normally handles
+    # WebGL (even on real hardware Chrome routes WebGL through ANGLE). SwiftShader
+    # is bundled inside Chromium so no system GL library is needed. The GPU
+    # process starts cleanly without /dev/dri, WebGL works, and canvas/WebGL
+    # fingerprints follow the normal Chrome GPU code path that reCAPTCHA expects.
+    # --disable-gpu is intentionally NOT set: it kills the GPU process entirely,
+    # creating a unique "no GPU" browser fingerprint that reCAPTCHA scores as bot.
+    opts.add_argument("--use-gl=angle")
+    opts.add_argument("--use-angle=swiftshader")
     opts.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
