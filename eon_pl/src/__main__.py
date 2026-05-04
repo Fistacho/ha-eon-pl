@@ -245,6 +245,7 @@ class App:
             cookie_store=self.cookie_store,
             trigger_login=self._on_login_request,
             trigger_fetch=self.fetch_once,
+            set_cookie=self._on_set_cookie,
         )
         runner = web.AppRunner(app)
         await runner.setup()
@@ -277,6 +278,25 @@ class App:
         cookie = await self.relogin()
         if self.client is not None:
             self.client.set_cookie(cookie)
+
+    async def _on_set_cookie(self, cookie_value: str) -> None:
+        """Validate and apply a cookie pasted manually by the user."""
+        client = EonPolskaClient(cookie_value)
+        try:
+            valid = await client.validate_session()
+        finally:
+            await client.aclose()
+        if not valid:
+            raise ValueError(
+                "Sesja nieważna — ciasteczko wygasło lub jest nieprawidłowe. "
+                "Zaloguj się jeszcze raz i skopiuj .AspNet.Cookies od nowa."
+            )
+        self.cookie_store.save(cookie_value)
+        self.state_store.record_login(datetime.now(timezone.utc))
+        if self.client is not None:
+            self.client.set_cookie(cookie_value)
+        _LOGGER.info("Manual cookie saved and validated — starting fetch")
+        await self.fetch_once()
 
 
 def main() -> None:

@@ -25,6 +25,7 @@ def build_app(
     cookie_store,
     trigger_login: Callable[[], Awaitable[None]],
     trigger_fetch: Callable[[], Awaitable[None]],
+    set_cookie: Callable[[str], Awaitable[None]],
 ) -> web.Application:
     app = web.Application()
 
@@ -68,12 +69,27 @@ def build_app(
         asyncio.create_task(_run_safely(trigger_fetch, "refetch"))
         return web.json_response({"status": "ok", "started": True})
 
+    async def post_set_cookie(req: web.Request) -> web.Response:
+        try:
+            data = await req.json()
+        except Exception:
+            return web.json_response({"status": "error", "message": "Nieprawidłowy JSON"}, status=400)
+        value = (data.get("cookie") or "").strip()
+        if not value:
+            return web.json_response({"status": "error", "message": "Brak wartości ciasteczka"}, status=400)
+        try:
+            await set_cookie(value)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"status": "error", "message": str(exc)}, status=422)
+        return web.json_response({"status": "ok"})
+
     async def health(_req: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
     app.router.add_get("/", index)
     app.router.add_post("/relogin", post_relogin)
     app.router.add_post("/refetch", post_refetch)
+    app.router.add_post("/set_cookie", post_set_cookie)
     app.router.add_get("/health", health)
     return app
 
@@ -108,6 +124,10 @@ def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, con
   .meta {{ display: grid; grid-template-columns: 200px 1fr; gap: .5em; margin: 1em 0; }}
   .meta div:nth-child(odd) {{ color: #666; }}
   button {{ padding: .6em 1.2em; margin-right: .5em; cursor: pointer; }}
+  details {{ margin-top: 1.5em; border: 1px solid #ddd; border-radius: 6px; padding: .8em 1em; }}
+  summary {{ cursor: pointer; font-weight: 500; }}
+  details textarea {{ width: 100%; box-sizing: border-box; margin: .6em 0; font-family: monospace; font-size: .8em; }}
+  .hint {{ color: #666; font-size: .85em; margin: .4em 0; }}
 </style>
 </head><body>
 <h1>E.ON Polska — Mój E.ON → Home Assistant</h1>
@@ -118,8 +138,21 @@ def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, con
   <div>Cookie</div><div>{cookie_state} (przechwycony: {cookie_captured})</div>
 </div>
 
-<button onclick="post('/relogin', this)">Zaloguj ponownie</button>
+<button onclick="post('/relogin', this)">Zaloguj ponownie (Selenium)</button>
 <button onclick="post('/refetch', this)">Pobierz dane teraz</button>
+
+<details>
+<summary>Ręczne wklejenie ciasteczka (obejście reCAPTCHA)</summary>
+<p class="hint">
+  Jeśli Selenium nie może się zalogować przez reCAPTCHA:<br>
+  1. Zaloguj się ręcznie na <strong>eon.pl</strong> w przeglądarce.<br>
+  2. Otwórz DevTools (F12) → <em>Application</em> → <em>Cookies</em> → <code>https://www.eon.pl</code>.<br>
+  3. Skopiuj wartość ciasteczka <code>.AspNet.Cookies</code>.<br>
+  4. Wklej poniżej i kliknij <em>Zapisz</em>.
+</p>
+<textarea id="ck" rows="5" placeholder="Wklej wartość .AspNet.Cookies tutaj…"></textarea><br>
+<button onclick="saveCookie(this)">Zapisz ciasteczko i pobierz dane</button>
+</details>
 
 <h2>Liczniki</h2>
 <table>
@@ -139,6 +172,19 @@ async function post(url, btn) {{
     setTimeout(() => location.reload(), 4000);
   }} catch (e) {{ btn.textContent = 'Błąd: ' + e; }}
   finally {{ setTimeout(() => {{ btn.disabled = false; btn.textContent = orig; }}, 6000); }}
+}}
+async function saveCookie(btn) {{
+  const val = document.getElementById('ck').value.trim();
+  if (!val) {{ alert('Wklej wartość ciasteczka'); return; }}
+  btn.disabled = true; const orig = btn.textContent;
+  btn.textContent = 'Zapisuję…';
+  try {{
+    const r = await fetch('/set_cookie', {{method:'POST', body: JSON.stringify({{cookie: val}}), headers:{{'Content-Type':'application/json'}}}});
+    const j = await r.json();
+    btn.textContent = j.status === 'ok' ? '✓ Zapisano — odśwież za chwilę' : ('Błąd: ' + (j.message||''));
+    if (j.status === 'ok') setTimeout(() => location.reload(), 3000);
+  }} catch (e) {{ btn.textContent = 'Błąd: ' + e; }}
+  finally {{ setTimeout(() => {{ btn.disabled = false; btn.textContent = orig; }}, 8000); }}
 }}
 </script>
 </body></html>"""

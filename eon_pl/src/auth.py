@@ -96,10 +96,13 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_argument("--password-store=basic")
     # Force X11 backend regardless of XDG_SESSION_TYPE inherited from host.
     opts.add_argument("--ozone-platform=x11")
-    # LIBGL_ALWAYS_SOFTWARE=1 is set in run.sh so Mesa llvmpipe handles all
-    # GL calls — the GPU process starts cleanly (no DRI device required) and
-    # canvas/WebGL fingerprints follow the normal Chrome GPU path instead of
-    # SwiftShader, which reCAPTCHA v3 scores closer to a real browser.
+    # Disable hardware GPU — the GPU subprocess crashes in Docker/LXC
+    # containers (no DRI device, restricted kernel caps), causing Chromium's
+    # main process to deadlock waiting for GPU IPC → 120 s ReadTimeoutError.
+    # SwiftShader keeps WebGL alive via CPU so reCAPTCHA v3 gets a valid
+    # context; selenium-stealth then masks the renderer strings.
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--use-gl=swiftshader")
     opts.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
