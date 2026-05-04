@@ -4,6 +4,7 @@ FROM $BUILD_FROM
 ENV LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    TZ=Europe/Warsaw \
     CHROMIUM_BIN=/usr/bin/chromium-browser \
     CHROMEDRIVER_BIN=/usr/bin/chromedriver
 
@@ -18,6 +19,9 @@ RUN apk add --no-cache \
         harfbuzz \
         ca-certificates \
         ttf-freefont \
+        ttf-dejavu \
+        ttf-liberation \
+        font-noto \
         tzdata \
         bash \
         xvfb-run \

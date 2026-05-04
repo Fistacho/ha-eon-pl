@@ -8,6 +8,7 @@ Lifecycle:
         - keepalive every 5 min
         - fetch every scan_interval_hours
         - re-login every cookie_refresh_hours (or on auth failure)
+          unless manual_cookie_only is enabled
   5. Web UI on ingress port 8099 for status + manual triggers.
 """
 from __future__ import annotations
@@ -45,25 +46,51 @@ class App:
         self._fetch_lock = asyncio.Lock()
         self._login_lock = asyncio.Lock()
 
+    def _persist_current_cookie(self, reason: str) -> None:
+        """Persist a renewed auth cookie if E.ON rotated it in Set-Cookie."""
+        if self.client is None:
+            return
+        cookie = self.client.auth_cookie
+        if not cookie:
+            return
+        saved_cookie, _ = self.cookie_store.load()
+        if cookie != saved_cookie:
+            self.cookie_store.save(cookie)
+            _LOGGER.info("Persisted refreshed E.ON cookie after %s", reason)
+
     # ---------------- bootstrap ----------------
 
     async def ensure_cookie(self) -> str:
-        """Return a valid cookie. Try persisted one first; fallback to Playwright."""
+        """Return a valid cookie. Try persisted one first; fallback to Selenium."""
         cookie, _ = self.cookie_store.load()
         if cookie:
             client = EonPolskaClient(cookie)
             try:
                 if await client.validate_session():
+                    refreshed_cookie = client.auth_cookie or cookie
+                    if refreshed_cookie != cookie:
+                        self.cookie_store.save(refreshed_cookie)
+                        _LOGGER.info("Persisted refreshed E.ON cookie after validation")
                     _LOGGER.info("Resuming with persisted cookie")
-                    await client.aclose()
-                    return cookie
+                    return refreshed_cookie
             finally:
                 await client.aclose()
-            _LOGGER.info("Persisted cookie is dead, will Playwright-login")
+            _LOGGER.info("Persisted cookie is dead")
+        if self.rt.options.manual_cookie_only:
+            _LOGGER.warning(
+                "No valid persisted cookie and manual_cookie_only=true. "
+                "Start Web UI and paste a fresh .AspNet.Cookies value."
+            )
+            return ""
         return await self.relogin()
 
     async def relogin(self) -> str:
-        """Always launches Playwright. Saves the new cookie."""
+        """Always launches Selenium. Saves the new cookie."""
+        if self.rt.options.manual_cookie_only:
+            raise LoginError(
+                "manual_cookie_only=true — paste .AspNet.Cookies in Web UI instead "
+                "of using Selenium login"
+            )
         async with self._login_lock:
             _LOGGER.info("Launching Selenium login...")
             cookie = await login_with_retry(
@@ -81,6 +108,7 @@ class App:
             ok = False
             try:
                 await self.coordinator.fetch()
+                self._persist_current_cookie("fetch")
                 ok = bool(self.coordinator.contracts)
                 if ok and self.mqtt is not None:
                     await self.mqtt.publish_discovery(self.coordinator.contracts)
@@ -101,6 +129,7 @@ class App:
             try:
                 if self.coordinator:
                     await self.coordinator.keepalive()
+                    self._persist_current_cookie("keepalive")
                     if _auth_fails:
                         _LOGGER.info("keepalive: session restored")
                     _auth_fails = 0
@@ -109,7 +138,14 @@ class App:
             except EonAuthError as exc:
                 _auth_fails += 1
                 _LOGGER.warning("keepalive: session expired (%s) — fail #%d", exc, _auth_fails)
-                if _auth_fails >= 3 and _time.monotonic() >= _next_relogin_at:
+                if self.rt.options.manual_cookie_only:
+                    if _auth_fails == 1 or _auth_fails % 12 == 0:
+                        _LOGGER.warning(
+                            "keepalive: manual cookie expired or invalid. "
+                            "Paste a fresh .AspNet.Cookies value in Web UI."
+                        )
+                        asyncio.create_task(self._notify_ha_cookie_expired())
+                elif _auth_fails >= 3 and _time.monotonic() >= _next_relogin_at:
                     _LOGGER.warning(
                         "keepalive: triggering re-login (backoff was %.0f min)",
                         _relogin_backoff / 60,
@@ -172,7 +208,7 @@ class App:
         self.coordinator = EonCoordinator(
             client=self.client,
             selected_kus=self.rt.options.selected_kus,
-            relogin=self.relogin,
+            relogin=None if self.rt.options.manual_cookie_only else self.relogin,
         )
         # Statistics importer — prefer user-provided long-lived token, fall
         # back to Supervisor token if it was injected.
@@ -236,7 +272,15 @@ class App:
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.exception("Initial fetch failed: %s", exc)
         else:
-            _LOGGER.warning("Skipping initial fetch — no valid session, waiting for keepalive re-login")
+            if self.rt.options.manual_cookie_only:
+                _LOGGER.warning(
+                    "Skipping initial fetch — no valid session. "
+                    "Paste .AspNet.Cookies in Web UI."
+                )
+            else:
+                _LOGGER.warning(
+                    "Skipping initial fetch — no valid session, waiting for keepalive re-login"
+                )
 
         # Web UI
         app = build_app(
@@ -246,6 +290,7 @@ class App:
             trigger_login=self._on_login_request,
             trigger_fetch=self.fetch_once,
             set_cookie=self._on_set_cookie,
+            manual_cookie_only=self.rt.options.manual_cookie_only,
         )
         runner = web.AppRunner(app)
         await runner.setup()
@@ -256,7 +301,10 @@ class App:
         # Background loops
         asyncio.create_task(self.loop_keepalive())
         asyncio.create_task(self.loop_fetch())
-        asyncio.create_task(self.loop_relogin())
+        if self.rt.options.manual_cookie_only:
+            _LOGGER.info("manual_cookie_only=true — periodic Selenium re-login disabled")
+        else:
+            asyncio.create_task(self.loop_relogin())
 
         # Block forever
         stop = asyncio.Event()
@@ -275,15 +323,48 @@ class App:
             await self.client.aclose()
 
     async def _on_login_request(self) -> None:
+        if self.rt.options.manual_cookie_only:
+            raise LoginError("manual_cookie_only=true — paste .AspNet.Cookies in Web UI")
         cookie = await self.relogin()
         if self.client is not None:
             self.client.set_cookie(cookie)
 
+    async def _notify_ha_cookie_expired(self) -> None:
+        """Send HA persistent notification asking user to paste a fresh cookie."""
+        token = self.rt.options.ha_token or self.rt.ha_token
+        if not token:
+            return
+        ha_url = "http://homeassistant:8123" if self.rt.options.ha_token else self.rt.ha_url
+        try:
+            import httpx  # already in requirements.txt
+            async with httpx.AsyncClient() as cli:
+                await cli.post(
+                    f"{ha_url}/api/services/persistent_notification/create",
+                    json={
+                        "notification_id": "eon_pl_cookie_expired",
+                        "title": "E.ON Polska: ciasteczko wygasło",
+                        "message": (
+                            "Sesja E.ON wygasła. Zaloguj się ręcznie na "
+                            "[eon.pl](https://eon.pl), otwórz DevTools (F12) → "
+                            "Application → Cookies → skopiuj wartość `.AspNet.Cookies` "
+                            "i wklej w panelu addona **E.ON Polska**."
+                        ),
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                )
+            _LOGGER.info("Sent HA persistent notification: cookie expired")
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Could not send HA notification: %s", exc)
+
     async def _on_set_cookie(self, cookie_value: str) -> None:
         """Validate and apply a cookie pasted manually by the user."""
         client = EonPolskaClient(cookie_value)
+        valid = False
+        refreshed_cookie = cookie_value
         try:
             valid = await client.validate_session()
+            refreshed_cookie = client.auth_cookie or cookie_value
         finally:
             await client.aclose()
         if not valid:
@@ -291,10 +372,10 @@ class App:
                 "Sesja nieważna — ciasteczko wygasło lub jest nieprawidłowe. "
                 "Zaloguj się jeszcze raz i skopiuj .AspNet.Cookies od nowa."
             )
-        self.cookie_store.save(cookie_value)
+        self.cookie_store.save(refreshed_cookie)
         self.state_store.record_login(datetime.now(timezone.utc))
         if self.client is not None:
-            self.client.set_cookie(cookie_value)
+            self.client.set_cookie(refreshed_cookie)
         _LOGGER.info("Manual cookie saved and validated — starting fetch")
         await self.fetch_once()
 

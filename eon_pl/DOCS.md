@@ -9,6 +9,7 @@ email: ""                  # Twój email do eon.pl
 password: ""               # Hasło do eon.pl
 scan_interval_hours: 6     # co ile godzin pobierać dane (1-24)
 cookie_refresh_hours: 12   # co ile godzin re-login (1-24)
+manual_cookie_only: false  # true = nie uruchamiaj Selenium, używaj tylko wklejonego cookie
 selected_kus: []           # lista KU ID (puste = wszystkie aktywne)
 log_level: info            # debug | info | warning | error
 mqtt_discovery: true       # publikuj encje przez MQTT auto-discovery
@@ -59,7 +60,13 @@ Jak często addon ma pobierać dane (billing, OZE, hourly readings). Default: `6
 
 ### cookie_refresh_hours
 
-Jak często wykonać Playwright re-login w celu odświeżenia `.AspNet.Cookies`. Default: `12`. Portal E.ON ma absolute session timeout — re-login co 12 h zapewnia że sesja nigdy nie wygasa.
+Jak często wykonać Selenium re-login w celu odświeżenia `.AspNet.Cookies`. Default: `12`. Portal E.ON ma absolute session timeout — re-login co 12 h zapewnia że sesja nigdy nie wygasa.
+
+### manual_cookie_only
+
+Ustaw `true`, jeśli nie chcesz używać automatycznego logowania ani CapSolvera. Addon nie uruchomi wtedy Selenium przy starcie, cyklicznie ani po wygaśnięciu sesji. Trzeba otworzyć **Web UI**, zalogować się ręcznie na `eon.pl` w zwykłej przeglądarce, skopiować `.AspNet.Cookies` albo pełny nagłówek `Cookie` i wkleić go w sekcji „Ręczne wklejenie ciasteczka”.
+
+Addon zapisuje odnowioną sesję, jeśli E.ON zwróci nowe `Set-Cookie` podczas keepalive albo pobierania danych. Gdy cookie mimo tego wygaśnie, addon nadal będzie działał w trybie zdegradowanym i poprosi w logach o wklejenie świeżego ciasteczka.
 
 ### selected_kus
 
@@ -104,6 +111,7 @@ Sprawdź **Logs** addona. Najczęstsze przyczyny:
 - zły email / hasło → `Login did not redirect to dashboard`
 - portal E.ON zmienił layout strony logowania → selectory w `auth.py` wymagają aktualizacji (zgłoś issue)
 - captcha-blok → odczekaj 30 min, spróbuj ponownie
+- bez CapSolvera → ustaw `manual_cookie_only: true` i wklej `.AspNet.Cookies` albo pełny nagłówek `Cookie` w Web UI
 
 ### Brak danych godzinowych
 

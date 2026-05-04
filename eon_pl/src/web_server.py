@@ -26,6 +26,7 @@ def build_app(
     trigger_login: Callable[[], Awaitable[None]],
     trigger_fetch: Callable[[], Awaitable[None]],
     set_cookie: Callable[[str], Awaitable[None]],
+    manual_cookie_only: bool = False,
 ) -> web.Application:
     app = web.Application()
 
@@ -54,6 +55,7 @@ def build_app(
             cookie_present=bool(cookie),
             cookie_captured=_fmt(captured),
             contracts=rows,
+            manual_cookie_only=manual_cookie_only,
         )
         return web.Response(text=body, content_type="text/html")
 
@@ -104,7 +106,15 @@ def _fmt(t: Any) -> str:
     return str(t)
 
 
-def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, contracts) -> str:
+def _render_html(
+    *,
+    last_login,
+    last_fetch,
+    cookie_present,
+    cookie_captured,
+    contracts,
+    manual_cookie_only: bool,
+) -> str:
     rows_html = "".join(
         f"<tr><td>{c['ku_name']}</td><td>{c['ppe_name']}</td>"
         f"<td>{c['last_hour_imported'] or '—'} kWh</td>"
@@ -112,6 +122,15 @@ def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, con
         for c in contracts
     ) or "<tr><td colspan=4>brak danych — naciśnij <em>Pobierz dane</em></td></tr>"
     cookie_state = "✓ zapisany" if cookie_present else "✗ brak"
+    login_button = (
+        '<button disabled title="Automatyczny login przez Chromium jest wyłączony (manual_cookie_only=true)">'
+        'Auto-login wyłączony</button>'
+        if manual_cookie_only
+        else '<button onclick="post(\'/relogin\', this)">Zaloguj ponownie (Chromium)</button>'
+    )
+    # Expand cookie form automatically when there is no cookie or when
+    # manual_cookie_only mode is active — the user needs to act.
+    details_open = " open" if (not cookie_present or manual_cookie_only) else ""
 
     return f"""<!doctype html>
 <html lang="pl"><head><meta charset="utf-8">
@@ -128,6 +147,7 @@ def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, con
   summary {{ cursor: pointer; font-weight: 500; }}
   details textarea {{ width: 100%; box-sizing: border-box; margin: .6em 0; font-family: monospace; font-size: .8em; }}
   .hint {{ color: #666; font-size: .85em; margin: .4em 0; }}
+  button:disabled {{ opacity: .55; cursor: not-allowed; }}
 </style>
 </head><body>
 <h1>E.ON Polska — Mój E.ON → Home Assistant</h1>
@@ -138,19 +158,19 @@ def _render_html(*, last_login, last_fetch, cookie_present, cookie_captured, con
   <div>Cookie</div><div>{cookie_state} (przechwycony: {cookie_captured})</div>
 </div>
 
-<button onclick="post('/relogin', this)">Zaloguj ponownie (Selenium)</button>
+{login_button}
 <button onclick="post('/refetch', this)">Pobierz dane teraz</button>
 
-<details>
+<details{details_open}>
 <summary>Ręczne wklejenie ciasteczka (obejście reCAPTCHA)</summary>
 <p class="hint">
   Jeśli Selenium nie może się zalogować przez reCAPTCHA:<br>
   1. Zaloguj się ręcznie na <strong>eon.pl</strong> w przeglądarce.<br>
   2. Otwórz DevTools (F12) → <em>Application</em> → <em>Cookies</em> → <code>https://www.eon.pl</code>.<br>
-  3. Skopiuj wartość ciasteczka <code>.AspNet.Cookies</code>.<br>
+  3. Skopiuj wartość ciasteczka <code>.AspNet.Cookies</code> albo cały nagłówek <code>Cookie</code> dla <code>eon.pl</code>.<br>
   4. Wklej poniżej i kliknij <em>Zapisz</em>.
 </p>
-<textarea id="ck" rows="5" placeholder="Wklej wartość .AspNet.Cookies tutaj…"></textarea><br>
+<textarea id="ck" rows="5" placeholder="Wklej .AspNet.Cookies albo pełny nagłówek Cookie tutaj…"></textarea><br>
 <button onclick="saveCookie(this)">Zapisz ciasteczko i pobierz dane</button>
 </details>
 

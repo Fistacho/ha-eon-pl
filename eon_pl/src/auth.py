@@ -1,64 +1,51 @@
-"""Selenium-based login flow for Mój E.ON.
+"""nodriver-based login flow for Mój E.ON.
 
-Spawns chromium via chromedriver on-demand, performs login (handles reCAPTCHA
-v3 naturally because it's a real browser fingerprint), then closes chromium.
+nodriver uses CDP websockets directly — Chrome never enters WebDriver automation
+mode, so navigator.webdriver is never set and reCAPTCHA v3 cannot detect the
+standard Selenium automation signal.
 
-We use Selenium instead of Playwright because Playwright has no musllinux
-(Alpine) wheels — Selenium is pure Python and chromedriver is in Alpine apk.
-
-RAM profile: ~30 MB idle (chromium not running), ~500 MB peak for ~30 s during
-login. The browser is killed immediately after the cookie is captured.
+If EON_CAPSOLVER_API_KEY is set, reCAPTCHA is solved via capsolver.com API
+and the token is injected before form submit (~$0.09/month at 2 logins/day).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
 import re
 import subprocess
 import time
+import urllib.request
 from typing import Any
 
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium_stealth import stealth
+import nodriver
 
 from .const import COOKIE_NAME, ENDPOINT_LOGIN, PAGE_DASHBOARD
 
 _LOGGER = logging.getLogger(__name__)
+
+_JS_EXTRACT_SITE_KEY = """
+(function() {
+    var scripts = document.querySelectorAll('script[src*="recaptcha"]');
+    for (var s of scripts) {
+        var m = s.src.match(/[?&]render=([^&\\s]+)/);
+        if (m && m[1] !== 'explicit') return m[1];
+    }
+    var el = document.querySelector('[data-sitekey]');
+    if (el) return el.getAttribute('data-sitekey');
+    return null;
+})()
+"""
 
 
 class LoginError(Exception):
     """Login attempt failed."""
 
 
-def _detect_chromium_version(chromium_path: str) -> str:
-    """Return installed Chromium version (e.g. '131.0.6778.139')."""
-    try:
-        r = subprocess.run(
-            [chromium_path, "--version"],
-            capture_output=True, text=True, timeout=5,
-        )
-        m = re.search(r"(\d+\.\d+\.\d+\.\d+)", r.stdout)
-        return m.group(1) if m else "131.0.0.0"
-    except Exception:
-        return "131.0.0.0"
-
-
 def _kill_stale_chromium() -> None:
-    """Kill orphaned chromedriver/chromium processes from previous failed attempts.
-
-    Each failed webdriver.Chrome() init leaves a zombie chromedriver (and the
-    Chromium it spawned) because service.stop() is never called on exception.
-    After a few rounds these exhaust memory and cause every new attempt to hang.
-    """
+    """Kill orphaned chromedriver/chromium processes."""
     for pattern in ("chromedriver", "chromium-browser", "chromium"):
         try:
             subprocess.run(
@@ -70,90 +57,58 @@ def _kill_stale_chromium() -> None:
     time.sleep(0.8)
 
 
-def _build_driver() -> webdriver.Chrome:
-    chromium_path = os.environ.get(
-        "CHROMIUM_BIN", "/usr/bin/chromium-browser"
-    )
-    chromedriver_path = os.environ.get(
-        "CHROMEDRIVER_BIN", "/usr/bin/chromedriver"
-    )
-
-    version = _detect_chromium_version(chromium_path)
-    _LOGGER.debug("Chromium version: %s", version)
-
-    opts = Options()
-    opts.binary_location = chromium_path
-    # No --headless: we run on Xvfb (DISPLAY=:99 set by xvfb-run wrapper).
-    # reCAPTCHA v3 scores --headless=new fingerprints very low; non-headless
-    # on a virtual X server scores roughly the same as a real desktop browser.
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--window-size=1366,768")
-    opts.add_argument("--lang=pl-PL")
-    # Chromium 120+ on containers without D-Bus hangs waiting for the system
-    # keyring; --password-store=basic bypasses the keyring entirely.
-    opts.add_argument("--password-store=basic")
-    # Force X11 backend regardless of XDG_SESSION_TYPE inherited from host.
-    opts.add_argument("--ozone-platform=x11")
-    # Use ANGLE+SwiftShader — the proper Chrome GPU path for containers.
-    # Requires chromium-swiftshader package (libvk_swiftshader.so) which is a
-    # separate Alpine split package NOT included with plain `chromium`.
-    # Without it --use-angle=swiftshader crashes the GPU process; with it the
-    # GPU process initialises cleanly, WebGL works, and canvas/WebGL fingerprint
-    # matches a real desktop browser (better reCAPTCHA v3 score than --disable-gpu).
-    opts.add_argument("--use-gl=angle")
-    opts.add_argument("--use-angle=swiftshader")
-    opts.add_argument(
-        f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
-    )
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-
-    debug_dir = os.environ.get("EON_DATA_DIR", "/data")
-    log_path = os.path.join(debug_dir, "chromedriver.log")
-    service = Service(executable_path=chromedriver_path, log_output=log_path)
-    driver = webdriver.Chrome(service=service, options=opts)
-
-    # Apply selenium-stealth fingerprint masking. This patches:
-    # navigator.webdriver, navigator.languages, navigator.plugins,
-    # WebGL renderer/vendor, screen size etc — enough to bring reCAPTCHA v3
-    # score back into "human" range. Without this eon.pl rejects the login
-    # with "Błąd działania reCaptcha".
-    stealth(
-        driver,
-        languages=["pl-PL", "pl"],
-        vendor="Google Inc.",
-        platform="Win32",
-        webgl_vendor="Intel Inc.",
-        renderer="Intel Iris OpenGL Engine",
-        fix_hairline=True,
-    )
-
-    # Belt-and-braces — explicitly remove navigator.webdriver via CDP. Some
-    # versions of selenium-stealth don't cover this on the very first
-    # document load.
-    try:
-        driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": (
-                    "Object.defineProperty(navigator, 'webdriver', "
-                    "{get: () => undefined});"
-                )
-            },
+def _capsolver_get_token(api_key: str, page_url: str, site_key: str) -> str:
+    """Call capsolver.com API — blocking, run via asyncio.to_thread."""
+    def _post(url: str, payload: dict) -> dict:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-    except Exception:
-        pass
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
 
-    return driver
+    _LOGGER.info("Capsolver: creating task for %s", page_url)
+    result = _post("https://api.capsolver.com/createTask", {
+        "clientKey": api_key,
+        "task": {
+            "type": "ReCaptchaV3TaskProxyless",
+            "websiteURL": page_url,
+            "websiteKey": site_key,
+            "pageAction": "login",
+            "minScore": 0.7,
+        },
+    })
+    if result.get("errorId", 0) != 0:
+        raise LoginError(f"Capsolver createTask error: {result.get('errorDescription')}")
+
+    task_id = result["taskId"]
+    _LOGGER.debug("Capsolver task ID: %s", task_id)
+
+    for _ in range(30):
+        time.sleep(3)
+        result = _post("https://api.capsolver.com/getTaskResult", {
+            "clientKey": api_key,
+            "taskId": task_id,
+        })
+        if result.get("errorId", 0) != 0:
+            raise LoginError(f"Capsolver error: {result.get('errorDescription')}")
+        if result.get("status") == "ready":
+            token = result["solution"]["gRecaptchaResponse"]
+            _LOGGER.info("Capsolver: token received (len=%d)", len(token))
+            return token
+
+    raise LoginError("Capsolver: timeout after 90s")
 
 
-def _login_sync(email: str, password: str, timeout_s: int) -> str:
-    """Blocking login flow. Caller wraps in asyncio.to_thread()."""
+async def _login_async(email: str, password: str, timeout_s: int) -> str:
+    """Native async login using nodriver (CDP-based, no WebDriver protocol)."""
     if not email or not password:
         raise LoginError("Empty email or password — set them in addon options")
+
+    chromium_path = os.environ.get("CHROMIUM_BIN", "/usr/bin/chromium-browser")
+    debug_dir = os.environ.get("EON_DATA_DIR", "/data")
 
     display = os.environ.get("DISPLAY", "")
     if display:
@@ -161,186 +116,196 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
         if not os.path.exists(socket_path):
             _LOGGER.warning("X socket %s missing — Xvfb not running on %s", socket_path, display)
 
-    _LOGGER.debug("Killing any stale chromium/chromedriver processes before launch")
-    _kill_stale_chromium()
+    _LOGGER.debug("Killing stale chromium processes")
+    await asyncio.to_thread(_kill_stale_chromium)
+
+    cfg = nodriver.Config()
+    cfg.browser_executable_path = chromium_path
+    cfg.headless = False
+    # nodriver manages several flags internally and raises ValueError if we try
+    # to add them via add_argument — silently skip those.
+    for arg in [
+        "--disable-dev-shm-usage",
+        "--window-size=1366,768",
+        "--lang=pl-PL",
+        "--password-store=basic",
+        "--ozone-platform=x11",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+    ]:
+        try:
+            cfg.add_argument(arg)
+        except ValueError:
+            pass
 
     try:
-        driver = _build_driver()
+        browser = await nodriver.start(cfg)
     except Exception as exc:
         raise LoginError(f"Failed to launch chromium: {exc}") from exc
 
-    debug_dir = os.environ.get("EON_DATA_DIR", "/data")
-
     try:
-        _LOGGER.info("Selenium: navigating to %s", ENDPOINT_LOGIN)
-        driver.set_page_load_timeout(timeout_s)
-        driver.get(ENDPOINT_LOGIN)
+        _LOGGER.info("nodriver: navigating to %s", ENDPOINT_LOGIN)
+        tab = await browser.get(ENDPOINT_LOGIN)
 
-        # Brief pause — let reCAPTCHA v3 observe page load before we interact.
-        time.sleep(random.uniform(2.5, 4.5))
+        await asyncio.sleep(random.uniform(2.5, 4.5))
 
-        wait = WebDriverWait(driver, timeout_s)
-
-        # Email field — eon.pl uses name="UserName" (not "Email").
+        # Email field
         try:
-            email_el = wait.until(EC.presence_of_element_located((
-                By.CSS_SELECTOR,
-                'input#UserName, input[name="UserName"]',
-            )))
-        except TimeoutException as exc:
-            _dump_debug(driver, debug_dir, "email_field_missing")
-            raise LoginError(
-                f"Email field not found within {timeout_s}s — "
-                f"login page may have changed (debug saved to {debug_dir})"
-            ) from exc
+            email_el = await tab.find('input#UserName', timeout=timeout_s)
+        except Exception as exc:
+            await _dump_debug(tab, debug_dir, "email_field_missing")
+            raise LoginError(f"Email field not found within {timeout_s}s") from exc
 
-        # Move cursor to field before clicking — looks more human.
-        ActionChains(driver).move_to_element(email_el).pause(
-            random.uniform(0.3, 0.7)
-        ).click().perform()
-        email_el.clear()
+        await email_el.click()
+        await asyncio.sleep(random.uniform(0.3, 0.6))
         for ch in email:
-            email_el.send_keys(ch)
-            time.sleep(random.uniform(0.05, 0.13))
+            await email_el.send_keys(ch)
+            await asyncio.sleep(random.uniform(0.05, 0.13))
 
-        time.sleep(random.uniform(0.3, 0.7))
+        await asyncio.sleep(random.uniform(0.3, 0.7))
 
-        pw_el = driver.find_element(
-            By.CSS_SELECTOR,
-            'input#Password, input[name="Password"]',
-        )
-        ActionChains(driver).move_to_element(pw_el).pause(
-            random.uniform(0.2, 0.5)
-        ).click().perform()
-        pw_el.clear()
+        # Password field
+        pw_el = await tab.find('input[name="Password"]', timeout=10)
+        await pw_el.click()
+        await asyncio.sleep(random.uniform(0.2, 0.5))
         for ch in password:
-            pw_el.send_keys(ch)
-            time.sleep(random.uniform(0.05, 0.13))
+            await pw_el.send_keys(ch)
+            await asyncio.sleep(random.uniform(0.05, 0.13))
 
-        time.sleep(random.uniform(0.8, 1.8))
+        await asyncio.sleep(random.uniform(0.8, 1.8))
 
-        # Cookie consent banner (#clb) overlays the submit button. Try to
-        # accept it first; if no button is found, hide the overlay so the
-        # submit click goes through. This is purely a UX overlay — eon.pl
-        # already issued the cookies needed for the form to work.
-        _dismiss_cookie_banner(driver)
+        # Cookie banner
+        await _dismiss_cookie_banner(tab)
 
-        # Submit button — type="button", click triggers JS submitForm() which
-        # runs reCAPTCHA verification and POSTs to /mojeon/Logowanie.
-        submit_el = driver.find_element(
-            By.CSS_SELECTOR,
-            'button[data-test-id="login-button"]',
-        )
-        ActionChains(driver).move_to_element(submit_el).pause(
-            random.uniform(0.3, 0.6)
-        ).perform()
-        try:
-            submit_el.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", submit_el)
+        # Submit button
+        submit_el = await tab.find('button[data-test-id="login-button"]', timeout=10)
 
-        # Wait for redirect to /mojeon (out of /Logowanie). reCAPTCHA + POST
-        # can take 5–15 s, so the timeout matters.
-        try:
-            wait.until(lambda d: PAGE_DASHBOARD in d.current_url and
-                       "Logowanie" not in d.current_url)
-        except TimeoutException as exc:
-            _dump_debug(driver, debug_dir, "no_redirect_after_submit")
-            err_text = _try_capture_error(driver)
+        # Capsolver — inject pre-solved token before clicking submit
+        capsolver_key = os.environ.get("EON_CAPSOLVER_API_KEY", "")
+        if capsolver_key:
+            site_key = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
+            if site_key:
+                _LOGGER.info("Capsolver: solving reCAPTCHA v3 (site_key=%s...)", site_key[:8])
+                token = await asyncio.to_thread(
+                    _capsolver_get_token, capsolver_key, ENDPOINT_LOGIN, site_key
+                )
+                await tab.evaluate(f"""
+                    window.__eon_token = {json.dumps(token)};
+                    (function() {{
+                        var _o = window.grecaptcha || {{}};
+                        window.grecaptcha = Object.assign({{}}, _o, {{
+                            execute: function() {{
+                                var t = window.__eon_token;
+                                window.__eon_token = null;
+                                if (t) return Promise.resolve(t);
+                                return _o.execute ? _o.execute.apply(_o, arguments) : Promise.resolve('');
+                            }},
+                            ready: function(cb) {{ if (_o.ready) _o.ready(cb); else cb(); }}
+                        }});
+                    }})();
+                """)
+                _LOGGER.info("Capsolver: token injected")
+            else:
+                _LOGGER.warning("Capsolver: could not extract reCAPTCHA site key from page")
+
+        await submit_el.click()
+
+        # Wait for redirect away from login page
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            url = tab.url or ""
+            if PAGE_DASHBOARD in url and "Logowanie" not in url:
+                break
+        else:
+            await _dump_debug(tab, debug_dir, "no_redirect_after_submit")
+            err_text = await _try_capture_error(tab)
             raise LoginError(
                 f"Login did not redirect to dashboard within {timeout_s}s. "
                 f"Page error: {err_text}"
-            ) from exc
+            )
 
-        for c in driver.get_cookies():
-            if c.get("name") == COOKIE_NAME and "eon.pl" in c.get("domain", ""):
-                value = c.get("value", "")
-                if value:
-                    _LOGGER.info("Selenium login OK, captured %s", COOKIE_NAME)
-                    return value
+        # Extract cookie via CDP
+        from nodriver.cdp import network as cdp_net  # noqa: PLC0415
+        cookies = await tab.send(cdp_net.get_cookies())
+        for c in cookies:
+            if c.name == COOKIE_NAME and "eon.pl" in (c.domain or ""):
+                if c.value:
+                    _LOGGER.info("nodriver: login OK, captured %s", COOKIE_NAME)
+                    return c.value
+
         raise LoginError(f"{COOKIE_NAME} not found in cookies after login")
+
     finally:
         try:
-            driver.quit()
+            browser.stop()
         except Exception:
             pass
 
 
-def _dismiss_cookie_banner(driver: Any) -> None:
-    """Best-effort: click an Accept button in the GDPR/cookie banner; if no
-    button is found, hide the overlay container outright."""
-    accept_selectors = (
+async def _dismiss_cookie_banner(tab: Any) -> None:
+    """Click accept button in GDPR banner, or hide it."""
+    selectors = (
         '#clb button[id*="accept" i]',
         '#clb button[class*="accept" i]',
-        '#clb [data-test-id*="accept" i]',
         'button#cookie-accept',
         'button[aria-label*="zgadzam" i]',
         'button[aria-label*="accept" i]',
     )
-    for sel in accept_selectors:
+    for sel in selectors:
         try:
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            for el in els:
-                if el.is_displayed():
-                    try:
-                        el.click()
-                    except Exception:
-                        driver.execute_script("arguments[0].click();", el)
-                    _LOGGER.debug("Cookie banner dismissed via %s", sel)
-                    return
+            el = await tab.find(sel, timeout=2)
+            await el.click()
+            _LOGGER.debug("Cookie banner dismissed via %s", sel)
+            return
         except Exception:
             continue
-    # Fallback — just hide the overlay so it can't intercept clicks.
     try:
-        driver.execute_script(
-            "var b = document.getElementById('clb');"
-            "if (b) { b.style.display = 'none'; b.remove(); }"
+        await tab.evaluate(
+            "var b=document.getElementById('clb'); if(b){b.style.display='none';b.remove();}"
         )
-        _LOGGER.debug("Cookie banner #clb hidden via JS fallback")
+        _LOGGER.debug("Cookie banner #clb hidden via JS")
     except Exception:
         pass
 
 
-def _dump_debug(driver: Any, data_dir: str, tag: str) -> None:
-    """Save page HTML + screenshot to /data for post-mortem inspection."""
+async def _dump_debug(tab: Any, data_dir: str, tag: str) -> None:
     try:
-        html_path = os.path.join(data_dir, f"login_debug_{tag}.html")
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
         png_path = os.path.join(data_dir, f"login_debug_{tag}.png")
-        driver.save_screenshot(png_path)
-        _LOGGER.warning("Login debug dumped to %s and %s", html_path, png_path)
+        await tab.save_screenshot(png_path)
+        html_path = os.path.join(data_dir, f"login_debug_{tag}.html")
+        content = await tab.get_content()
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        _LOGGER.warning("Debug dumped: %s, %s", png_path, html_path)
     except Exception as exc:
         _LOGGER.debug("Debug dump failed: %s", exc)
 
 
-def _try_capture_error(driver: Any) -> str:
-    """Read any visible validation message from the form."""
+async def _try_capture_error(tab: Any) -> str:
     try:
-        for sel in (
-            ".validation-msg",
-            ".validation-msg-recaptcha",
-            "#recaptcha-error-banner",
-            ".form-validation-msg",
-        ):
-            for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                txt = (el.text or "").strip()
+        for sel in (".validation-msg", ".validation-msg-recaptcha", ".form-validation-msg"):
+            try:
+                el = await tab.find(sel, timeout=2)
+                txt = await tab.evaluate(
+                    f"document.querySelector({json.dumps(sel)})?.textContent?.trim() || ''"
+                )
                 if txt:
                     return txt
+            except Exception:
+                continue
     except Exception:
         pass
-    return f"current URL: {driver.current_url}"
+    return f"current URL: {tab.url}"
 
 
 async def selenium_login(email: str, password: str, *, timeout_s: int = 90) -> str:
-    """Async wrapper. Runs blocking Selenium calls in a thread."""
-    return await asyncio.to_thread(_login_sync, email, password, timeout_s)
+    """Login entry point (kept as selenium_login for API compatibility)."""
+    return await _login_async(email, password, timeout_s)
 
 
-async def login_with_retry(
-    email: str, password: str, *, attempts: int = 2
-) -> str:
-    """Run login() with simple retry on transient failures."""
+async def login_with_retry(email: str, password: str, *, attempts: int = 2) -> str:
+    """Run login with simple retry on transient failures."""
     last_exc: Exception | None = None
     for i in range(1, attempts + 1):
         try:

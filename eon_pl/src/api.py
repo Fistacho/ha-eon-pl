@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+from http.cookies import CookieError, SimpleCookie
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -43,6 +44,37 @@ _API_HEADERS = {
     "Expires": "Sat, 01 Jan 2000 00:00:00 GMT",
     "Referer": PAGE_HISTORIA_ZUZYCIA,
 }
+
+
+def _cookies_from_saved(raw: str) -> dict[str, str]:
+    """Accept either a bare .AspNet.Cookies value or a full Cookie header."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    if raw.lower().startswith("cookie:"):
+        raw = raw.split(":", 1)[1].strip()
+
+    # A bare ASP.NET auth value can contain "=", so treat single-token input as
+    # the auth cookie unless the cookie name is explicit.
+    if COOKIE_NAME not in raw and ";" not in raw:
+        return {COOKIE_NAME: raw}
+
+    jar = SimpleCookie()
+    try:
+        jar.load(raw)
+    except CookieError:
+        return {COOKIE_NAME: raw}
+
+    cookies = {name: morsel.value for name, morsel in jar.items()}
+    return cookies or {COOKIE_NAME: raw}
+
+
+def _cookies_to_header(cookies: httpx.Cookies) -> str:
+    pairs: list[str] = []
+    for cookie in cookies.jar:
+        if cookie.name and cookie.value:
+            pairs.append(f"{cookie.name}={cookie.value}")
+    return "; ".join(pairs)
 
 
 class EonAuthError(Exception):
@@ -115,7 +147,7 @@ class EonPolskaClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 headers=_API_HEADERS,
-                cookies={COOKIE_NAME: self._auth_cookie},
+                cookies=_cookies_from_saved(self._auth_cookie),
                 follow_redirects=False,
                 timeout=30,
             )
@@ -128,16 +160,18 @@ class EonPolskaClient:
     @property
     def auth_cookie(self) -> str:
         if self._client is not None:
-            cur = self._client.cookies.get(COOKIE_NAME)
+            cur = _cookies_to_header(self._client.cookies)
             if cur:
                 return cur
         return self._auth_cookie
 
     def set_cookie(self, cookie: str) -> None:
-        """Replace the in-flight cookie (e.g. after Playwright re-login)."""
+        """Replace the in-flight cookie (e.g. after Selenium re-login)."""
         self._auth_cookie = cookie
         if self._client is not None and not self._client.is_closed:
-            self._client.cookies.set(COOKIE_NAME, cookie, domain="eon.pl")
+            self._client.cookies.clear()
+            for name, value in _cookies_from_saved(cookie).items():
+                self._client.cookies.set(name, value, domain="eon.pl")
 
     def _check_auth(self, r: httpx.Response, url: str) -> None:
         if r.status_code in (301, 302, 303, 307, 308):

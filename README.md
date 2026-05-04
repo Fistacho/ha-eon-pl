@@ -7,7 +7,8 @@ Automatyczne pobieranie zużycia energii z **Mój E.ON** do Home Assistant. Logi
 
 ## Co robi
 
-- **Logowanie automatyczne** — Playwright + chromium odpalane on-demand (~30 s peak), reCAPTCHA v3 przechodzi naturalnie.
+- **Logowanie automatyczne** — Selenium + chromium odpalane on-demand (~30 s peak), jeśli portal zaakceptuje reCAPTCHA v3.
+- **Tryb ręcznego ciasteczka** — wariant bez CapSolvera: logujesz się normalnie w przeglądarce i wklejasz `.AspNet.Cookies` albo pełny nagłówek `Cookie` w Web UI.
 - **Hourly imported / exported** → Home Assistant **external statistics** (Energy Dashboard).
 - **Year-to-date backfill** przy pierwszym uruchomieniu (chunki 60 dni).
 - **Live "ostatnia godzina"** sensors (`pobrana / wprowadzona / bilans`).
@@ -34,6 +35,7 @@ Automatyczne pobieranie zużycia energii z **Mój E.ON** do Home Assistant. Logi
    password: TwojeHasło
    scan_interval_hours: 6
    cookie_refresh_hours: 12
+   manual_cookie_only: false # true = bez Selenium/CapSolver, tylko wklejone cookie
    selected_kus: []          # puste = wszystkie aktywne KU
    log_level: info
    mqtt_discovery: true
@@ -43,6 +45,8 @@ Automatyczne pobieranie zużycia energii z **Mój E.ON** do Home Assistant. Logi
 6. **Open Web UI** — zobacz status, kliknij "Pobierz dane teraz" jeśli chcesz przyspieszyć pierwszy fetch.
 
 Encje pojawiają się w HA przez MQTT auto-discovery w ciągu kilku sekund po pierwszym fetchu.
+
+Jeśli automatyczne logowanie kończy się błędem reCAPTCHA, ustaw `manual_cookie_only: true`, uruchom addon, otwórz **Open Web UI** i wklej `.AspNet.Cookies` albo pełny nagłówek `Cookie` skopiowany po ręcznym zalogowaniu na `eon.pl`. Addon będzie zapisywał odnowione cookie, jeśli E.ON zwróci nowe `Set-Cookie` podczas keepalive albo pobierania danych.
 
 ## Encje (per KU+PPE)
 
@@ -80,6 +84,7 @@ Plus **external statistics** (Energy Dashboard):
 │ │ (ingress)│  │  - keepalive 5min │         │
 │ └─────┬────┘  │  - fetch every Nh │         │
 │       │       │  - relogin every Nh│        │
+│       │       │    or manual cookie │        │
 │       └──────►│  - on-demand login │        │
 │               └────┬─────────┬─────┘         │
 │                    ▼         ▼               │

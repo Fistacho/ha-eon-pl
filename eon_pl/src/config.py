@@ -9,6 +9,16 @@ from dataclasses import dataclass, field
 _LOGGER = logging.getLogger(__name__)
 
 
+def _as_bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 @dataclass
 class AddonOptions:
     email: str
@@ -26,6 +36,8 @@ class AddonOptions:
     mqtt_user: str = ""
     mqtt_password: str = ""
     ha_token: str = ""
+    capsolver_api_key: str = ""
+    manual_cookie_only: bool = False
 
     @classmethod
     def load(cls, path: str | None = None) -> "AddonOptions":
@@ -45,6 +57,8 @@ class AddonOptions:
             mqtt_user=str(raw.get("mqtt_user", "")).strip(),
             mqtt_password=str(raw.get("mqtt_password", "")),
             ha_token=str(raw.get("ha_token", "")).strip(),
+            capsolver_api_key=str(raw.get("capsolver_api_key", "")).strip(),
+            manual_cookie_only=_as_bool(raw.get("manual_cookie_only"), False),
         )
 
 
