@@ -94,11 +94,14 @@ def _build_driver() -> webdriver.Chrome:
     # Chromium 120+ on containers without D-Bus hangs waiting for the system
     # keyring; --password-store=basic bypasses the keyring entirely.
     opts.add_argument("--password-store=basic")
-    # Force X11 backend — newer Chromium (120+) auto-detects Wayland if
-    # XDG_SESSION_TYPE=wayland is set (can be inherited from the host via
-    # Supervisor env injection). Without Wayland running in the container,
-    # Chromium hangs indefinitely waiting for the compositor.
+    # Force X11 backend regardless of XDG_SESSION_TYPE inherited from host.
     opts.add_argument("--ozone-platform=x11")
+    # Disable hardware GPU — the GPU subprocess crashes in Docker/LXC
+    # containers (no DRI device, wrong kernel caps), causing Chromium's main
+    # process to deadlock waiting for its response → 120 s ReadTimeoutError.
+    # SwiftShader keeps WebGL alive via pure CPU so reCAPTCHA v3 still works.
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--use-gl=swiftshader")
     opts.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
