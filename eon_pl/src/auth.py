@@ -52,6 +52,24 @@ def _detect_chromium_version(chromium_path: str) -> str:
         return "131.0.0.0"
 
 
+def _kill_stale_chromium() -> None:
+    """Kill orphaned chromedriver/chromium processes from previous failed attempts.
+
+    Each failed webdriver.Chrome() init leaves a zombie chromedriver (and the
+    Chromium it spawned) because service.stop() is never called on exception.
+    After a few rounds these exhaust memory and cause every new attempt to hang.
+    """
+    for pattern in ("chromedriver", "chromium-browser", "chromium"):
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                capture_output=True, timeout=5, check=False,
+            )
+        except Exception:
+            pass
+    time.sleep(0.8)
+
+
 def _build_driver() -> webdriver.Chrome:
     chromium_path = os.environ.get(
         "CHROMIUM_BIN", "/usr/bin/chromium-browser"
@@ -73,6 +91,9 @@ def _build_driver() -> webdriver.Chrome:
     opts.add_argument("--disable-blink-features=AutomationControlled")
     opts.add_argument("--window-size=1366,768")
     opts.add_argument("--lang=pl-PL")
+    # Chromium 120+ on containers without D-Bus hangs waiting for the system
+    # keyring; --password-store=basic bypasses the keyring entirely.
+    opts.add_argument("--password-store=basic")
     opts.add_argument(
         f"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
@@ -127,6 +148,9 @@ def _login_sync(email: str, password: str, timeout_s: int) -> str:
         socket_path = f"/tmp/.X11-unix/X{display.lstrip(':')}"
         if not os.path.exists(socket_path):
             _LOGGER.warning("X socket %s missing — Xvfb not running on %s", socket_path, display)
+
+    _LOGGER.debug("Killing any stale chromium/chromedriver processes before launch")
+    _kill_stale_chromium()
 
     try:
         driver = _build_driver()
