@@ -31,21 +31,26 @@ from .const import COOKIE_NAME, ENDPOINT_LOGIN, PAGE_DASHBOARD
 
 _LOGGER = logging.getLogger(__name__)
 
-# Platform-specific UA so navigator.platform and the UA string are consistent.
-# reCaptcha v3 checks both — a mismatch (Linux UA on Windows platform) scores poorly.
+# Platform-specific UA/WebGL so navigator.platform, the UA string, and the WebGL
+# renderer are all consistent.  reCaptcha v3 checks cross-signal coherence — a mismatch
+# (Linux UA + Windows Direct3D11 WebGL renderer) is an obvious bot signal.
 if sys.platform == "win32":
     _USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/131.0.6778.205 Safari/537.36"
     )
     _NAV_PLATFORM = "Win32"
+    _WEBGL_VENDOR = "Google Inc. (Intel)"
+    _WEBGL_RENDERER = "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)"
 else:
-    # Alpine/Linux container: Chromium 131 on x86_64
+    # Alpine/Linux container: Chromium uses ANGLE with OpenGL/EGL backend (Mesa)
     _USER_AGENT = (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/131.0.6778.205 Safari/537.36"
     )
     _NAV_PLATFORM = "Linux x86_64"
+    _WEBGL_VENDOR = "Google Inc. (Intel Open Source Technology Center)"
+    _WEBGL_RENDERER = "ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.6.0 - Build 27.20.100.8681)"
 
 # Injected on every new document via Page.addScriptToEvaluateOnNewDocument so it
 # runs before any page script (including reCAPTCHA).  Key goals:
@@ -89,14 +94,30 @@ _STEALTH_JS = f"""
         try {{
             var _orig = proto.getParameter.bind(proto);
             proto.getParameter = function (p) {{
-                if (p === 37445) return 'Google Inc. (Intel)';
-                if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)';
+                if (p === 37445) return {json.dumps(_WEBGL_VENDOR)};
+                if (p === 37446) return {json.dumps(_WEBGL_RENDERER)};
                 return _orig(p);
             }};
         }} catch (e) {{}}
     }};
     if (typeof WebGLRenderingContext !== 'undefined') _spoof(WebGLRenderingContext.prototype);
     try {{ if (typeof WebGL2RenderingContext !== 'undefined') _spoof(WebGL2RenderingContext.prototype); }} catch (e) {{}}
+
+    // Canvas fingerprint noise — SwiftShader renders pixel-exact patterns that
+    // fingerprinters recognise. Adding a fixed 1-pixel delta makes the fingerprint
+    // unique per session while keeping it indistinguishable from a real browser.
+    try {{
+        var _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type, quality) {{
+            var ctx = this.getContext && this.getContext('2d');
+            if (ctx && this.width > 0 && this.height > 0) {{
+                var px = ctx.getImageData(0, 0, 1, 1);
+                px.data[0] = (px.data[0] + 1) & 0xFF;
+                ctx.putImageData(px, 0, 0);
+            }}
+            return _origToDataURL.apply(this, arguments);
+        }};
+    }} catch (e) {{}}
 
     try {{ Object.defineProperty(navigator, 'languages', {{get: () => ['pl-PL', 'pl', 'en-US', 'en']}}); }} catch (e) {{}}
 
@@ -467,6 +488,33 @@ async def _hybrid_login_async(email: str, password: str, timeout_s: int) -> str:
         # Simulate brief human activity (score boost)
         _LOGGER.info("Hybrid login: simulating user activity for score boost...")
         await _simulate_page_interaction(tab)
+
+        # Fill in email/password — more realistic user behavior; reCaptcha v3 scores
+        # sessions higher when the user interacts with form fields before execute().
+        try:
+            email_coords = await _get_element_center(tab, "input#UserName, input[name='UserName'], input[type='email']")
+            if email_coords:
+                await _mouse_move(tab, *email_coords, steps=8)
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+            email_el = await tab.find("input#UserName, input[name='UserName'], input[type='email']", best_match=True)
+            if email_el:
+                await email_el.click()
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+                await email_el.send_keys(email)
+                await asyncio.sleep(random.uniform(0.6, 1.2))
+            pass_coords = await _get_element_center(tab, "input#Password, input[name='Password'], input[type='password']")
+            if pass_coords:
+                await _mouse_move(tab, *pass_coords, steps=6)
+                await asyncio.sleep(random.uniform(0.2, 0.4))
+            pass_el = await tab.find("input#Password, input[name='Password'], input[type='password']", best_match=True)
+            if pass_el:
+                await pass_el.click()
+                await asyncio.sleep(random.uniform(0.3, 0.5))
+                await pass_el.send_keys(password)
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+            _LOGGER.debug("Hybrid login: form fields filled")
+        except Exception as _fe:
+            _LOGGER.debug("Hybrid login: form fill skipped (%s)", _fe)
 
         # Wait for grecaptcha.execute to be ready
         _gc_ready = False
