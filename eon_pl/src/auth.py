@@ -39,6 +39,9 @@ _USER_AGENT = (
 #   2. Spoof WebGL renderer — SwiftShader ("ANGLE ... SwiftShader") is an
 #      instantly-recognisable bot fingerprint; fake an Intel integrated GPU.
 #   3. Restore navigator.languages to a plausible Polish-language profile.
+#   4. Intercept window.grecaptcha assignment so execute() is patched before any
+#      page script calls it — when reCAPTCHA api.js does window.grecaptcha={…}
+#      our setter fires and wraps execute() to return window.__eon_token.
 _STEALTH_JS = """
 (function () {
     try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined, configurable: true}); } catch (e) {}
@@ -57,19 +60,56 @@ _STEALTH_JS = """
     try { if (typeof WebGL2RenderingContext !== 'undefined') _spoof(WebGL2RenderingContext.prototype); } catch (e) {}
 
     try { Object.defineProperty(navigator, 'languages', {get: () => ['pl-PL', 'pl', 'en-US', 'en']}); } catch (e) {}
+
+    // Intercept grecaptcha property assignment — runs before reCAPTCHA api.js
+    // sets window.grecaptcha, so we patch execute() on the object before any
+    // page code (event listeners, ready() callbacks) captures a reference to it.
+    var _gcVal = undefined;
+    function _patchGC(obj) {
+        if (!obj || typeof obj.execute !== 'function') return obj;
+        var _oe = obj.execute;
+        obj.execute = function() {
+            if (window.__eon_token) {
+                var t = window.__eon_token;
+                window.__eon_token = null;
+                return Promise.resolve(t);
+            }
+            return _oe.apply(obj, arguments);
+        };
+        return obj;
+    }
+    try {
+        Object.defineProperty(window, 'grecaptcha', {
+            configurable: true,
+            enumerable: true,
+            get: function() { return _gcVal; },
+            set: function(v) { _gcVal = _patchGC(v); }
+        });
+    } catch(e) {}
 })();
 """
 
+# Returns {siteKey, action} — action is extracted from inline grecaptcha.execute() call.
 _JS_EXTRACT_SITE_KEY = """
 (function() {
+    var siteKey = null, action = null;
+
     var scripts = document.querySelectorAll('script[src*="recaptcha"]');
     for (var s of scripts) {
         var m = s.src.match(/[?&]render=([^&\\s]+)/);
-        if (m && m[1] !== 'explicit') return m[1];
+        if (m && m[1] !== 'explicit') { siteKey = m[1]; break; }
     }
     var el = document.querySelector('[data-sitekey]');
-    if (el) return el.getAttribute('data-sitekey');
-    return null;
+    if (el && !siteKey) siteKey = el.getAttribute('data-sitekey');
+
+    var inline = document.querySelectorAll('script:not([src])');
+    for (var s of inline) {
+        var text = s.textContent || '';
+        var m = text.match(/grecaptcha\\.execute\\s*\\([^,]+,\\s*\\{[^}]*action\\s*:\\s*['\"](\\w+)['\"]/);
+        if (m) { action = m[1]; break; }
+    }
+
+    return {siteKey: siteKey, action: action};
 })()
 """
 
@@ -91,7 +131,7 @@ def _kill_stale_chromium() -> None:
     time.sleep(0.8)
 
 
-def _capsolver_get_token(api_key: str, page_url: str, site_key: str) -> str:
+def _capsolver_get_token(api_key: str, page_url: str, site_key: str, action: str = "login") -> str:
     """Call capsolver.com API — blocking, run via asyncio.to_thread."""
     def _post(url: str, payload: dict) -> dict:
         data = json.dumps(payload).encode()
@@ -103,14 +143,14 @@ def _capsolver_get_token(api_key: str, page_url: str, site_key: str) -> str:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
 
-    _LOGGER.info("Capsolver: creating task for %s", page_url)
+    _LOGGER.info("Capsolver: creating task for %s (action=%s)", page_url, action)
     result = _post("https://api.capsolver.com/createTask", {
         "clientKey": api_key,
         "task": {
             "type": "ReCaptchaV3TaskProxyless",
             "websiteURL": page_url,
             "websiteKey": site_key,
-            "pageAction": "login",
+            "pageAction": action,
             "minScore": 0.7,
         },
     })
@@ -252,27 +292,53 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
         # Key comes from addon options (passed as parameter), with env var as fallback.
         capsolver_key = capsolver_key or os.environ.get("EON_CAPSOLVER_API_KEY", "")
         if capsolver_key:
-            site_key = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
+            site_info = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
+            site_key = site_info.get("siteKey") if isinstance(site_info, dict) else site_info
+            action = (site_info.get("action") or "login") if isinstance(site_info, dict) else "login"
             if site_key:
-                _LOGGER.info("Capsolver: solving reCAPTCHA v3 (site_key=%s...)", site_key[:8])
-                token = await asyncio.to_thread(
-                    _capsolver_get_token, capsolver_key, ENDPOINT_LOGIN, site_key
+                _LOGGER.info(
+                    "Capsolver: solving reCAPTCHA v3 (site_key=%s..., action=%s)",
+                    site_key[:8], action,
                 )
-                await tab.evaluate(f"""
-                    window.__eon_token = {json.dumps(token)};
-                    (function() {{
-                        var _o = window.grecaptcha || {{}};
-                        window.grecaptcha = Object.assign({{}}, _o, {{
-                            execute: function() {{
-                                var t = window.__eon_token;
-                                window.__eon_token = null;
-                                if (t) return Promise.resolve(t);
-                                return _o.execute ? _o.execute.apply(_o, arguments) : Promise.resolve('');
-                            }},
-                            ready: function(cb) {{ if (_o.ready) _o.ready(cb); else cb(); }}
-                        }});
-                    }})();
-                """)
+                token = await asyncio.to_thread(
+                    _capsolver_get_token, capsolver_key, ENDPOINT_LOGIN, site_key, action
+                )
+                # Three-layer injection to cover all EON reCaptcha patterns:
+                # 1. window.__eon_token is read by the stealth-JS property setter that
+                #    patched grecaptcha.execute() before any page script ran.
+                # 2. Direct mutation of the live grecaptcha.execute — covers cases where
+                #    the property setter ran before stealth JS registered (or was bypassed).
+                #    Mutates the SAME object so all captured references see the change.
+                # 3. Overwrites hidden g-recaptcha-response inputs — covers cases where
+                #    execute() was already called on page load and stored a low-score token.
+                inject_js = f"""
+(function() {{
+    var token = {json.dumps(token)};
+
+    window.__eon_token = token;
+
+    if (window.grecaptcha && typeof window.grecaptcha.execute === 'function') {{
+        var _oe = window.grecaptcha.execute;
+        window.grecaptcha.execute = function() {{
+            var t = window.__eon_token;
+            window.__eon_token = null;
+            if (t) return Promise.resolve(t);
+            return _oe.apply(this, arguments);
+        }};
+    }}
+
+    var fields = document.querySelectorAll(
+        '[name="g-recaptcha-response"], .g-recaptcha-response, ' +
+        '[name="RecaptchaToken"], [id*="RecaptchaToken"]'
+    );
+    fields.forEach(function(el) {{
+        el.value = token;
+        try {{ el.dispatchEvent(new Event('change', {{bubbles: true}})); }} catch(e) {{}}
+    }});
+    console.log('[EON] capsolver token injected, hidden fields: ' + fields.length);
+}})();
+"""
+                await tab.evaluate(inject_js)
                 _LOGGER.info("Capsolver: token injected")
             else:
                 _LOGGER.warning("Capsolver: could not extract reCAPTCHA site key from page")
