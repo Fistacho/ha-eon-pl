@@ -89,7 +89,8 @@ _STEALTH_JS = """
 })();
 """
 
-# Returns {siteKey, action} — action is extracted from inline grecaptcha.execute() call.
+# Returns JSON string "{\"siteKey\":\"...\",\"action\":\"...\"}" so tab.evaluate()
+# gives back a plain Python string that json.loads() can parse.
 _JS_EXTRACT_SITE_KEY = """
 (function() {
     var siteKey = null, action = null;
@@ -109,7 +110,7 @@ _JS_EXTRACT_SITE_KEY = """
         if (m) { action = m[1]; break; }
     }
 
-    return {siteKey: siteKey, action: action};
+    return JSON.stringify({siteKey: siteKey, action: action});
 })()
 """
 
@@ -292,9 +293,13 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
         # Key comes from addon options (passed as parameter), with env var as fallback.
         capsolver_key = capsolver_key or os.environ.get("EON_CAPSOLVER_API_KEY", "")
         if capsolver_key:
-            site_info = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
-            site_key = site_info.get("siteKey") if isinstance(site_info, dict) else site_info
-            action = (site_info.get("action") or "login") if isinstance(site_info, dict) else "login"
+            site_info_raw = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
+            try:
+                site_info = json.loads(site_info_raw) if isinstance(site_info_raw, str) else {}
+            except Exception:
+                site_info = {}
+            site_key = site_info.get("siteKey")
+            action = site_info.get("action") or "login"
             if site_key:
                 _LOGGER.info(
                     "Capsolver: solving reCAPTCHA v3 (site_key=%s..., action=%s)",
