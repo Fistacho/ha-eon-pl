@@ -61,6 +61,22 @@ _STEALTH_JS = """
 
     try { Object.defineProperty(navigator, 'languages', {get: () => ['pl-PL', 'pl', 'en-US', 'en']}); } catch (e) {}
 
+    // window.chrome expected by reCAPTCHA — absent in Chromium without extension
+    try {
+        if (!window.chrome) {
+            window.chrome = { app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } }, csi: function(){}, loadTimes: function(){}, runtime: {} };
+        }
+    } catch (e) {}
+
+    // Fake minimal plugin list — empty plugins[] is a known headless signal
+    try {
+        var _fakePlugins = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer'].map(function(name) {
+            return { name: name, filename: 'internal-pdf-viewer', description: 'Portable Document Format' };
+        });
+        Object.defineProperty(navigator, 'plugins', { get: function() { return _fakePlugins; } });
+        Object.defineProperty(navigator, 'mimeTypes', { get: function() { return []; } });
+    } catch (e) {}
+
     // Intercept grecaptcha property assignment — runs before reCAPTCHA api.js
     // sets window.grecaptcha, so we patch execute() on the object before any
     // page code (event listeners, ready() callbacks) captures a reference to it.
@@ -286,15 +302,14 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
         # Cookie banner
         await _dismiss_cookie_banner(tab)
 
-        # Capsolver — obtain and inject pre-solved token, then trigger form submission
-        # directly via EON's own submitRecaptcha() function instead of relying on the
-        # browser to call grecaptcha.execute().
+        # Capsolver — obtain a pre-solved token, stage it as window.__eon_token, then
+        # click the login button to let the page run its own submit flow.
         #
-        # EON's flow: submitForm() → recaptchaLoad() → grecaptcha.execute() →
-        #             submitRecaptcha(token) → sets input[name="Token"] → dispatches
-        #             'recaptchaSubmit' event → listener submits form.
-        # We short-circuit directly to submitRecaptcha(token), bypassing the whole
-        # grecaptcha chain which is where detection/interception was failing.
+        # EON's flow: button click → submitForm() → recaptchaLoad() →
+        #             grecaptcha.ready() → grecaptcha.execute() [our patch returns
+        #             __eon_token] → .then(t => submitRecaptcha(t)) → form submits.
+        # Staging via __eon_token instead of calling submitRecaptcha() directly keeps
+        # the full form-submit path intact (jQuery validation, CSRF token, etc.).
         capsolver_key = capsolver_key or os.environ.get("EON_CAPSOLVER_API_KEY", "")
         submitted_via_capsolver = False
         if capsolver_key:
@@ -313,39 +328,17 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
                 token = await asyncio.to_thread(
                     _capsolver_get_token, capsolver_key, ENDPOINT_LOGIN, site_key, action
                 )
-                submit_js = f"""
-(function() {{
-    var token = {json.dumps(token)};
-
-    // Primary: call EON's own submitRecaptcha() — this is what normally gets
-    // called after grecaptcha.execute() resolves.  Sets input[name="Token"]
-    // and dispatches 'recaptchaSubmit' which triggers the actual form submit.
-    if (typeof submitRecaptcha === 'function') {{
-        submitRecaptcha(token);
-        return;
-    }}
-
-    // Fallback A: set Token field + dispatch recaptchaSubmit manually
-    var tf = document.querySelector('input[name="Token"]');
-    if (tf) {{ tf.value = token; tf.dispatchEvent(new Event('change', {{bubbles: true}})); }}
-    var form = document.querySelector('form#login-form');
-    if (form) {{ form.dispatchEvent(new Event('recaptchaSubmit')); return; }}
-
-    // Fallback B: window.__eon_token for our grecaptcha.execute intercept
-    window.__eon_token = token;
-    if (window.grecaptcha && typeof window.grecaptcha.execute === 'function') {{
-        var _oe = window.grecaptcha.execute;
-        window.grecaptcha.execute = function() {{
-            var t = window.__eon_token; window.__eon_token = null;
-            if (t) return Promise.resolve(t);
-            return _oe.apply(this, arguments);
-        }};
-    }}
-}})();
-"""
-                await tab.evaluate(submit_js)
+                # Stage the token so our patched grecaptcha.execute() returns it.
+                # Then click the login button to trigger the page's own flow:
+                #   submitForm() → recaptchaLoad() → grecaptcha.ready() →
+                #   grecaptcha.execute() [returns __eon_token] →
+                #   .then(t => submitRecaptcha(t)) → form submits naturally.
+                await tab.evaluate(f"window.__eon_token = {json.dumps(token)};")
+                _LOGGER.info("Capsolver: token staged, clicking login button")
+                submit_el = await tab.find('button[data-test-id="login-button"]', timeout=10)
+                await submit_el.click()
                 submitted_via_capsolver = True
-                _LOGGER.info("Capsolver: token submitted via submitRecaptcha()")
+                _LOGGER.info("Capsolver: login button clicked, waiting for redirect")
             else:
                 _LOGGER.warning("Capsolver: could not extract reCAPTCHA site key from page")
 
