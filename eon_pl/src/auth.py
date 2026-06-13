@@ -286,12 +286,17 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
         # Cookie banner
         await _dismiss_cookie_banner(tab)
 
-        # Submit button
-        submit_el = await tab.find('button[data-test-id="login-button"]', timeout=10)
-
-        # Capsolver — inject pre-solved token before clicking submit
-        # Key comes from addon options (passed as parameter), with env var as fallback.
+        # Capsolver — obtain and inject pre-solved token, then trigger form submission
+        # directly via EON's own submitRecaptcha() function instead of relying on the
+        # browser to call grecaptcha.execute().
+        #
+        # EON's flow: submitForm() → recaptchaLoad() → grecaptcha.execute() →
+        #             submitRecaptcha(token) → sets input[name="Token"] → dispatches
+        #             'recaptchaSubmit' event → listener submits form.
+        # We short-circuit directly to submitRecaptcha(token), bypassing the whole
+        # grecaptcha chain which is where detection/interception was failing.
         capsolver_key = capsolver_key or os.environ.get("EON_CAPSOLVER_API_KEY", "")
+        submitted_via_capsolver = False
         if capsolver_key:
             site_info_raw = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
             try:
@@ -308,47 +313,45 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
                 token = await asyncio.to_thread(
                     _capsolver_get_token, capsolver_key, ENDPOINT_LOGIN, site_key, action
                 )
-                # Three-layer injection to cover all EON reCaptcha patterns:
-                # 1. window.__eon_token is read by the stealth-JS property setter that
-                #    patched grecaptcha.execute() before any page script ran.
-                # 2. Direct mutation of the live grecaptcha.execute — covers cases where
-                #    the property setter ran before stealth JS registered (or was bypassed).
-                #    Mutates the SAME object so all captured references see the change.
-                # 3. Overwrites hidden g-recaptcha-response inputs — covers cases where
-                #    execute() was already called on page load and stored a low-score token.
-                inject_js = f"""
+                submit_js = f"""
 (function() {{
     var token = {json.dumps(token)};
 
-    window.__eon_token = token;
+    // Primary: call EON's own submitRecaptcha() — this is what normally gets
+    // called after grecaptcha.execute() resolves.  Sets input[name="Token"]
+    // and dispatches 'recaptchaSubmit' which triggers the actual form submit.
+    if (typeof submitRecaptcha === 'function') {{
+        submitRecaptcha(token);
+        return;
+    }}
 
+    // Fallback A: set Token field + dispatch recaptchaSubmit manually
+    var tf = document.querySelector('input[name="Token"]');
+    if (tf) {{ tf.value = token; tf.dispatchEvent(new Event('change', {{bubbles: true}})); }}
+    var form = document.querySelector('form#login-form');
+    if (form) {{ form.dispatchEvent(new Event('recaptchaSubmit')); return; }}
+
+    // Fallback B: window.__eon_token for our grecaptcha.execute intercept
+    window.__eon_token = token;
     if (window.grecaptcha && typeof window.grecaptcha.execute === 'function') {{
         var _oe = window.grecaptcha.execute;
         window.grecaptcha.execute = function() {{
-            var t = window.__eon_token;
-            window.__eon_token = null;
+            var t = window.__eon_token; window.__eon_token = null;
             if (t) return Promise.resolve(t);
             return _oe.apply(this, arguments);
         }};
     }}
-
-    var fields = document.querySelectorAll(
-        '[name="g-recaptcha-response"], .g-recaptcha-response, ' +
-        '[name="RecaptchaToken"], [id*="RecaptchaToken"]'
-    );
-    fields.forEach(function(el) {{
-        el.value = token;
-        try {{ el.dispatchEvent(new Event('change', {{bubbles: true}})); }} catch(e) {{}}
-    }});
-    console.log('[EON] capsolver token injected, hidden fields: ' + fields.length);
 }})();
 """
-                await tab.evaluate(inject_js)
-                _LOGGER.info("Capsolver: token injected")
+                await tab.evaluate(submit_js)
+                submitted_via_capsolver = True
+                _LOGGER.info("Capsolver: token submitted via submitRecaptcha()")
             else:
                 _LOGGER.warning("Capsolver: could not extract reCAPTCHA site key from page")
 
-        await submit_el.click()
+        if not submitted_via_capsolver:
+            submit_el = await tab.find('button[data-test-id="login-button"]', timeout=10)
+            await submit_el.click()
 
         # Wait for redirect away from login page
         deadline = asyncio.get_event_loop().time() + timeout_s
