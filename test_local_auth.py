@@ -2,21 +2,26 @@
 Local auth test — runs the EON login flow on Windows using local Chrome.
 
 Usage:
-    set EON_EMAIL=twoj@email.pl
-    set EON_PASSWORD=haslo
-    set EON_CAPSOLVER_API_KEY=opcjonalny_klucz   (lub zostaw puste aby testować bez)
     python test_local_auth.py
 
-Requires: pip install nodriver
-Chrome must be installed at default location or set CHROMIUM_BIN.
+Credentials are loaded automatically from test_local.env (KEY=VALUE format).
+You can also set them as environment variables before running.
+
+Required vars:
+    EON_EMAIL       — email address for eon.pl
+    EON_PASSWORD    — password for eon.pl
+
+Optional:
+    EON_CAPSOLVER_API_KEY — capsolver.com API key (leave empty to test native only)
+    CHROMIUM_BIN          — path to Chrome/Chromium executable
 """
 import asyncio
 import logging
 import os
 import sys
 
-# Add src to path so we can import auth
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "eon_pl", "src"))
+# Add eon_pl/ to path so 'src' is importable as a package (auth.py uses relative imports)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "eon_pl"))
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -25,19 +30,46 @@ logging.basicConfig(
 _LOG = logging.getLogger("test_auth")
 
 
-async def main():
+def _load_dotenv(path: str) -> None:
+    """Load KEY=VALUE pairs from a file into os.environ (never overwrites existing vars)."""
+    if not os.path.exists(path):
+        return
+    loaded: list[str] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+                loaded.append(key)
+    if loaded:
+        _LOG.info("Loaded from %s: %s", os.path.basename(path), ", ".join(loaded))
+
+
+async def main() -> None:
+    # Load credentials from test_local.env (sits next to this script)
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_local.env")
+    _load_dotenv(env_file)
+
     email = os.environ.get("EON_EMAIL", "")
     password = os.environ.get("EON_PASSWORD", "")
     capsolver = os.environ.get("EON_CAPSOLVER_API_KEY", "")
 
     if not email or not password:
-        print("ERROR: Set EON_EMAIL and EON_PASSWORD environment variables first.")
-        print("  set EON_EMAIL=twoj@email.pl")
-        print("  set EON_PASSWORD=haslo")
+        print("ERROR: EON_EMAIL and EON_PASSWORD must be set.")
+        print("  Create test_local.env with:")
+        print("    EON_EMAIL=twoj@email.pl")
+        print("    EON_PASSWORD=haslo")
         sys.exit(1)
 
-    # Point to local Chrome on Windows
-    if not os.environ.get("CHROMIUM_BIN"):
+    # On Windows: always detect local Chrome (overrides any Linux path from test_local.env)
+    if sys.platform == "win32":
         candidates = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -51,17 +83,17 @@ async def main():
         else:
             _LOG.warning("Chrome not found at default locations — nodriver will try auto-detect")
 
-    # Override data dir for debug screenshots
-    os.environ["EON_DATA_DIR"] = os.path.dirname(__file__)
+    # Debug screenshots go next to this script
+    os.environ["EON_DATA_DIR"] = os.path.dirname(os.path.abspath(__file__))
 
     if capsolver:
-        _LOG.info("Capsolver key provided — will test with CapSolver")
+        _LOG.info("CapSolver key provided — attempt 1: native, attempt 2: CapSolver")
     else:
         _LOG.info("No CapSolver key — testing native browser reCaptcha only")
 
     try:
-        from auth import login_with_retry
-        cookie = await login_with_retry(email, password, attempts=1, capsolver_key=capsolver)
+        from src.auth import login_with_retry  # type: ignore[import]
+        cookie = await login_with_retry(email, password, attempts=2, capsolver_key=capsolver)
         _LOG.info("SUCCESS! Cookie obtained (len=%d)", len(cookie))
         _LOG.info("Cookie starts: %s...", cookie[:40])
     except Exception as exc:
