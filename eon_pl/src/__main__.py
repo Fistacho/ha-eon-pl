@@ -94,7 +94,9 @@ class App:
         async with self._login_lock:
             _LOGGER.info("Launching Selenium login...")
             cookie = await login_with_retry(
-                self.rt.options.email, self.rt.options.password
+                self.rt.options.email,
+                self.rt.options.password,
+                capsolver_key=self.rt.options.capsolver_api_key,
             )
             self.cookie_store.save(cookie)
             self.state_store.record_login(datetime.now(timezone.utc))

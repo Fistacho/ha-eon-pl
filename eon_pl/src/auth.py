@@ -136,7 +136,7 @@ def _capsolver_get_token(api_key: str, page_url: str, site_key: str) -> str:
     raise LoginError("Capsolver: timeout after 90s")
 
 
-async def _login_async(email: str, password: str, timeout_s: int) -> str:
+async def _login_async(email: str, password: str, timeout_s: int, capsolver_key: str = "") -> str:
     """Native async login using nodriver (CDP-based, no WebDriver protocol)."""
     if not email or not password:
         raise LoginError("Empty email or password — set them in addon options")
@@ -249,7 +249,8 @@ async def _login_async(email: str, password: str, timeout_s: int) -> str:
         submit_el = await tab.find('button[data-test-id="login-button"]', timeout=10)
 
         # Capsolver — inject pre-solved token before clicking submit
-        capsolver_key = os.environ.get("EON_CAPSOLVER_API_KEY", "")
+        # Key comes from addon options (passed as parameter), with env var as fallback.
+        capsolver_key = capsolver_key or os.environ.get("EON_CAPSOLVER_API_KEY", "")
         if capsolver_key:
             site_key = await tab.evaluate(_JS_EXTRACT_SITE_KEY)
             if site_key:
@@ -367,17 +368,17 @@ async def _try_capture_error(tab: Any) -> str:
     return f"current URL: {tab.url}"
 
 
-async def selenium_login(email: str, password: str, *, timeout_s: int = 90) -> str:
+async def selenium_login(email: str, password: str, *, timeout_s: int = 90, capsolver_key: str = "") -> str:
     """Login entry point (kept as selenium_login for API compatibility)."""
-    return await _login_async(email, password, timeout_s)
+    return await _login_async(email, password, timeout_s, capsolver_key=capsolver_key)
 
 
-async def login_with_retry(email: str, password: str, *, attempts: int = 2) -> str:
+async def login_with_retry(email: str, password: str, *, attempts: int = 2, capsolver_key: str = "") -> str:
     """Run login with simple retry on transient failures."""
     last_exc: Exception | None = None
     for i in range(1, attempts + 1):
         try:
-            return await selenium_login(email, password)
+            return await selenium_login(email, password, capsolver_key=capsolver_key)
         except LoginError as exc:
             last_exc = exc
             _LOGGER.warning("Login attempt %d/%d failed: %s", i, attempts, exc)
