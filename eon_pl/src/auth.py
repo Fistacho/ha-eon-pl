@@ -343,6 +343,10 @@ async def _login_async(email: str, password: str, timeout_s: int, capsolver_key:
                 _LOGGER.warning("Capsolver: could not extract reCAPTCHA site key from page")
 
         if not submitted_via_capsolver:
+            # Native reCaptcha path — wait a moment for grecaptcha to finish
+            # initializing (YETT.js unblocks the api.js script on page "load").
+            _LOGGER.info("Native reCaptcha: clicking login button (no pre-solved token)")
+            await asyncio.sleep(random.uniform(1.0, 2.0))
             submit_el = await tab.find('button[data-test-id="login-button"]', timeout=10)
             await submit_el.click()
 
@@ -441,11 +445,21 @@ async def selenium_login(email: str, password: str, *, timeout_s: int = 90, caps
 
 
 async def login_with_retry(email: str, password: str, *, attempts: int = 2, capsolver_key: str = "") -> str:
-    """Run login with simple retry on transient failures."""
+    """Run login with simple retry on transient failures.
+
+    Attempt 1: native browser reCaptcha (no CapSolver) — better score since the
+    token comes from the actual browser session.  CapSolver ProxyLess tokens are
+    solved on third-party servers whose IPs Google rates poorly (~0.1 score).
+    Attempt 2+: CapSolver as fallback if the native attempt fails.
+    """
     last_exc: Exception | None = None
     for i in range(1, attempts + 1):
+        # Use CapSolver only on retries — first attempt always uses native reCaptcha.
+        key = capsolver_key if i > 1 else ""
+        if i == 1 and capsolver_key:
+            _LOGGER.info("Login attempt %d/%d: native browser reCaptcha (CapSolver reserved for retry)", i, attempts)
         try:
-            return await selenium_login(email, password, capsolver_key=capsolver_key)
+            return await selenium_login(email, password, capsolver_key=key)
         except LoginError as exc:
             last_exc = exc
             _LOGGER.warning("Login attempt %d/%d failed: %s", i, attempts, exc)
