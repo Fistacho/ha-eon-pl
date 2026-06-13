@@ -191,21 +191,29 @@ async def _login_async(email: str, password: str, timeout_s: int) -> str:
         raise LoginError(f"Failed to launch chromium: {exc}") from exc
 
     try:
-        # Inject stealth JS BEFORE navigating so it executes on every new document,
-        # including the reCAPTCHA iframe — overrides webdriver flag, WebGL renderer.
+        # Inject stealth JS BEFORE the login page loads.
+        # Strategy: navigate to about:blank first to obtain a tab reference, register
+        # addScriptToEvaluateOnNewDocument (runs on EVERY new document incl. iframes),
+        # then navigate to the login page — script executes before reCAPTCHA scripts.
         try:
             from nodriver.cdp import page as cdp_page  # noqa: PLC0415
-            _mt = getattr(browser, "main_tab", None)
-            if _mt is not None:
-                await _mt.send(
-                    cdp_page.add_script_to_evaluate_on_new_document(source=_STEALTH_JS)
-                )
-                _LOGGER.debug("Stealth JS injected (reCAPTCHA evasion)")
+            _setup_tab = await browser.get("about:blank")
+            await _setup_tab.send(
+                cdp_page.add_script_to_evaluate_on_new_document(source=_STEALTH_JS)
+            )
+            _LOGGER.info("Stealth JS registered — will run before reCAPTCHA (WebGL spoof + webdriver hide)")
         except Exception as exc:
-            _LOGGER.debug("Stealth JS injection non-fatal: %s", exc)
+            _LOGGER.warning("Stealth JS registration failed: %s", exc)
 
         _LOGGER.info("nodriver: navigating to %s", ENDPOINT_LOGIN)
         tab = await browser.get(ENDPOINT_LOGIN)
+
+        # Belt-and-suspenders: also evaluate directly in main frame context
+        # in case addScriptToEvaluateOnNewDocument didn't persist across navigation.
+        try:
+            await tab.evaluate(_STEALTH_JS)
+        except Exception:
+            pass
 
         await asyncio.sleep(random.uniform(2.5, 4.5))
 
