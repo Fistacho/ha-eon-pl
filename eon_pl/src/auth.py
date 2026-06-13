@@ -26,6 +26,40 @@ from .const import COOKIE_NAME, ENDPOINT_LOGIN, PAGE_DASHBOARD
 
 _LOGGER = logging.getLogger(__name__)
 
+# Realistic desktop Chrome UA — Alpine's Chromium runs on aarch64 but reporting
+# x86_64 is less suspicious. Chrome/131 = December 2024 stable release.
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.6778.205 Safari/537.36"
+)
+
+# Injected on every new document via Page.addScriptToEvaluateOnNewDocument so it
+# runs before any page script (including reCAPTCHA).  Key goals:
+#   1. Remove the automation/webdriver flag that Chromium normally sets.
+#   2. Spoof WebGL renderer — SwiftShader ("ANGLE ... SwiftShader") is an
+#      instantly-recognisable bot fingerprint; fake an Intel integrated GPU.
+#   3. Restore navigator.languages to a plausible Polish-language profile.
+_STEALTH_JS = """
+(function () {
+    try { Object.defineProperty(navigator, 'webdriver', {get: () => undefined, configurable: true}); } catch (e) {}
+
+    var _spoof = function (proto) {
+        try {
+            var _orig = proto.getParameter.bind(proto);
+            proto.getParameter = function (p) {
+                if (p === 37445) return 'Google Inc. (Intel)';
+                if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)';
+                return _orig(p);
+            };
+        } catch (e) {}
+    };
+    if (typeof WebGLRenderingContext !== 'undefined') _spoof(WebGLRenderingContext.prototype);
+    try { if (typeof WebGL2RenderingContext !== 'undefined') _spoof(WebGL2RenderingContext.prototype); } catch (e) {}
+
+    try { Object.defineProperty(navigator, 'languages', {get: () => ['pl-PL', 'pl', 'en-US', 'en']}); } catch (e) {}
+})();
+"""
+
 _JS_EXTRACT_SITE_KEY = """
 (function() {
     var scripts = document.querySelectorAll('script[src*="recaptcha"]');
@@ -132,11 +166,24 @@ async def _login_async(email: str, password: str, timeout_s: int) -> str:
         "--ozone-platform=x11",
         "--use-gl=angle",
         "--use-angle=swiftshader",
+        f"--user-agent={_USER_AGENT}",
     ]:
         try:
             cfg.add_argument(arg)
         except ValueError:
             pass
+
+    # nodriver by default disables site isolation (--disable-features=IsolateOrigins,
+    # site-per-process).  reCAPTCHA cross-origin iframes may need site isolation to
+    # execute correctly — remove that flag if accessible.
+    try:
+        _args = list(getattr(cfg, "browser_args", []))
+        _filtered = [a for a in _args if "IsolateOrigins" not in a and "site-per-process" not in a]
+        if len(_filtered) < len(_args):
+            cfg.browser_args = _filtered
+            _LOGGER.debug("Removed site-isolation-disable flag from browser args")
+    except Exception:
+        pass
 
     try:
         browser = await nodriver.start(cfg)
@@ -144,6 +191,19 @@ async def _login_async(email: str, password: str, timeout_s: int) -> str:
         raise LoginError(f"Failed to launch chromium: {exc}") from exc
 
     try:
+        # Inject stealth JS BEFORE navigating so it executes on every new document,
+        # including the reCAPTCHA iframe — overrides webdriver flag, WebGL renderer.
+        try:
+            from nodriver.cdp import page as cdp_page  # noqa: PLC0415
+            _mt = getattr(browser, "main_tab", None)
+            if _mt is not None:
+                await _mt.send(
+                    cdp_page.add_script_to_evaluate_on_new_document(source=_STEALTH_JS)
+                )
+                _LOGGER.debug("Stealth JS injected (reCAPTCHA evasion)")
+        except Exception as exc:
+            _LOGGER.debug("Stealth JS injection non-fatal: %s", exc)
+
         _LOGGER.info("nodriver: navigating to %s", ENDPOINT_LOGIN)
         tab = await browser.get(ENDPOINT_LOGIN)
 
