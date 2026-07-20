@@ -76,7 +76,7 @@ class MqttConfig:
 # ---------- Discovery + state ----------
 
 # (key_in_state, name_pl, unit, device_class, state_class, icon)
-_SENSORS: list[tuple[str, str, str, str, str, str]] = [
+_SENSORS_OZE: list[tuple[str, str, str, str, str, str]] = [
     ("consumption_current_period",
      "Zużycie (bieżący okres rozliczeniowy)", "kWh", "energy", "total_increasing",
      "mdi:lightning-bolt"),
@@ -98,6 +98,17 @@ _SENSORS: list[tuple[str, str, str, str, str, str]] = [
     ("last_hour_balance",
      "Bilans (ostatnia godzina)", "kWh", "energy", "total",
      "mdi:scale-balance"),
+]
+
+# Consumption-only accounts: no export/balance and no hourly data — the
+# portal serves billing-period consumption and meter states instead.
+_SENSORS_NON_OZE: list[tuple[str, str, str, str, str, str]] = [
+    ("consumption_current_period",
+     "Zużycie (bieżący okres rozliczeniowy)", "kWh", "energy", "total_increasing",
+     "mdi:lightning-bolt"),
+    ("meter_reading",
+     "Stan licznika", "kWh", "energy", "total_increasing",
+     "mdi:counter"),
 ]
 
 
@@ -149,8 +160,19 @@ class MqttPublisher:
     async def publish_discovery(self, contracts: dict[str, dict[str, Any]]) -> None:
         assert self._client is not None
         for key, c in contracts.items():
+            sensors = _SENSORS_OZE if c.get("has_oze", True) else _SENSORS_NON_OZE
+            removed = _SENSORS_NON_OZE if c.get("has_oze", True) else _SENSORS_OZE
             device = _device_payload(key, c["ku"], c["ppe"])
-            for sensor_key, name, unit, dev_class, state_class, icon in _SENSORS:
+            # Clear retained discovery topics of the other account type so
+            # stale entities disappear (idempotent — empty payload each time).
+            active_keys = {s[0] for s in sensors}
+            for sensor_key, *_rest in removed:
+                if sensor_key in active_keys:
+                    continue
+                await self._client.publish(
+                    _discovery_topic(key, sensor_key), "", retain=True
+                )
+            for sensor_key, name, unit, dev_class, state_class, icon in sensors:
                 payload = {
                     "name": name,
                     "unique_id": f"{DOMAIN}_{key}_{sensor_key}",
@@ -202,6 +224,16 @@ class MqttPublisher:
     def _state_payload(
         contract: dict[str, Any], last_hour: dict[str, Any] | None
     ) -> dict[str, Any]:
+        if not contract.get("has_oze", True):
+            cons = contract.get("consumption") or {}
+            return {
+                "consumption_current_period": cons.get("current_period_kwh"),
+                "meter_reading": cons.get("meter_reading_kwh"),
+                "meter_reading_date": cons.get("meter_reading_date"),
+                "meter_reading_type": cons.get("meter_reading_type"),
+                "meter_serial": cons.get("meter_serial"),
+                "current_period_date": cons.get("current_period_date"),
+            }
         billing = contract.get("billing")
         oze = contract.get("oze")
         out: dict[str, Any] = {
