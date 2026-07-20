@@ -9,7 +9,14 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Callable
 
-from .api import EonApiError, EonAuthError, EonPolskaClient
+from .api import (
+    EonApiError,
+    EonAuthError,
+    EonPolskaClient,
+    parse_chart_rows,
+    parse_history_meters,
+    parse_meter_readings,
+)
 from .const import (
     HOURLY_DATE_OFFSET_DAYS,
     STATS_BACKFILL_DAYS_FALLBACK,
@@ -85,8 +92,8 @@ class EonCoordinator:
 
         self.ph = ph or {}
         partners = self.ph.get("Partners") or []
-        _LOGGER.info("GetPHList ok, partners=%d HasOze=%s",
-                     len(partners), self.ph.get("HasOze"))
+        has_oze = bool(self.ph.get("HasOze"))
+        _LOGGER.info("GetPHList ok, partners=%d HasOze=%s", len(partners), has_oze)
 
         new_contracts: dict[str, dict[str, Any]] = {}
         new_fresh: dict[str, list[dict[str, Any]]] = {}
@@ -98,25 +105,33 @@ class EonCoordinator:
                 ku_id = str(ku["Id"])
                 if self._selected_kus and ku_id not in self._selected_kus:
                     continue
-                for ppe in ku.get("PPEList", []):
+
+                # Non-OZE consumption charts are per-KU (+meter), not per-PPE.
+                ku_consumption: dict[str, Any] | None = None
+                if not has_oze:
+                    ku_consumption = await self._fetch_consumption(ku_id)
+
+                for ppe_index, ppe in enumerate(ku.get("PPEList", [])):
                     ppe_id = str(ppe["Id"])
                     key = f"{ku_id}_{ppe_id}"
                     cd: dict[str, Any] = {
                         "ku": ku,
                         "ppe": ppe,
+                        "has_oze": has_oze,
                         "billing": None,
                         "oze": None,
                         "meter": None,
+                        "consumption": None,
                     }
-                    try:
-                        cd["billing"] = await self._with_relogin(
-                            lambda: self._client.get_billing_data(ku_id, ppe_id),
-                            what=f"billing[{key}]",
-                        )
-                    except (EonApiError, EonAuthError) as exc:
-                        _LOGGER.warning("Billing unavailable for %s: %s", key, exc)
+                    if has_oze:
+                        try:
+                            cd["billing"] = await self._with_relogin(
+                                lambda: self._client.get_billing_data(ku_id, ppe_id),
+                                what=f"billing[{key}]",
+                            )
+                        except (EonApiError, EonAuthError) as exc:
+                            _LOGGER.warning("Billing unavailable for %s: %s", key, exc)
 
-                    if self.ph.get("HasOze"):
                         try:
                             cd["oze"] = await self._with_relogin(
                                 lambda: self._client.get_oze_agr_data(ku_id, ppe_id),
@@ -133,18 +148,117 @@ class EonCoordinator:
                     except (EonApiError, EonAuthError) as exc:
                         _LOGGER.debug("Meter unavailable for %s: %s", key, exc)
 
-                    rows = await self._fetch_hourly(ku_id, ppe_id)
-                    if rows:
-                        new_fresh[key] = rows
-                        rows.sort(key=lambda r: r["timestamp"])
-                        self.last_hour[key] = rows[-1]
+                    if has_oze:
+                        rows = await self._fetch_hourly(ku_id, ppe_id)
+                        if rows:
+                            new_fresh[key] = rows
+                            rows.sort(key=lambda r: r["timestamp"])
+                            self.last_hour[key] = rows[-1]
+                    elif ppe_index == 0:
+                        # Attach KU-level consumption to the first PPE only so a
+                        # multi-PPE KU doesn't duplicate sensors and statistics.
+                        cd["consumption"] = self._build_consumption(
+                            ku_consumption, cd["meter"]
+                        )
+                        rows = self._consumption_stat_rows(ku_consumption)
+                        if rows:
+                            new_fresh[key] = rows
 
                     new_contracts[key] = cd
 
         self.contracts = new_contracts
         self.fresh_rows = new_fresh
-        _LOGGER.info("Fetch done, contracts=%d, fresh hourly rows=%d",
+        _LOGGER.info("Fetch done, contracts=%d, fresh stat rows=%d",
                      len(new_contracts), sum(len(v) for v in new_fresh.values()))
+
+    async def _fetch_consumption(self, ku_id: str) -> dict[str, Any]:
+        """Non-OZE data: CompareYear + Details consumption charts for one KU.
+
+        Note: both the Historia-zuzycia meter list and GetMeterReadingsForKU
+        follow the portal's current KU context, so multi-KU accounts are
+        best-effort (the portal has no per-KU OZE flag either).
+        """
+        out: dict[str, Any] = {
+            "year_rows": [], "details_rows": [],
+            "meter_id": None, "meter_serial": None,
+        }
+        try:
+            cy = await self._with_relogin(
+                lambda: self._client.get_compare_year_data(ku_id),
+                what=f"compare_year[{ku_id}]",
+            )
+            out["year_rows"] = parse_chart_rows(cy)
+        except (EonApiError, EonAuthError) as exc:
+            _LOGGER.warning("CompareYear unavailable for %s: %s", ku_id, exc)
+
+        meters: list[dict[str, Any]] = []
+        try:
+            html = await self._with_relogin(
+                self._client.get_history_page, what="history_page"
+            )
+            meters = [m for m in parse_history_meters(html) if m["active"]]
+        except (EonApiError, EonAuthError) as exc:
+            _LOGGER.warning("History page unavailable: %s", exc)
+
+        if meters:
+            out["meter_id"] = meters[0]["meter_id"]
+            out["meter_serial"] = meters[0]["serial"]
+            try:
+                det = await self._with_relogin(
+                    lambda: self._client.get_details_chart_data(
+                        ku_id, meters[0]["meter_id"]
+                    ),
+                    what=f"details[{ku_id}]",
+                )
+                out["details_rows"] = parse_chart_rows(det)
+            except (EonApiError, EonAuthError) as exc:
+                _LOGGER.warning("Details chart unavailable for %s: %s", ku_id, exc)
+        else:
+            _LOGGER.warning("No active meter found on Historia-zuzycia for %s", ku_id)
+        return out
+
+    @staticmethod
+    def _build_consumption(
+        ku_consumption: dict[str, Any] | None, meter: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Flatten chart + meter data into the per-contract sensor payload."""
+        cons = dict(ku_consumption or {})
+        year_rows = cons.get("year_rows") or []
+        if year_rows:
+            cons["current_period_kwh"] = year_rows[-1]["kwh"]
+            cons["current_period_date"] = year_rows[-1]["date"].isoformat()
+        readings = [
+            r for r in parse_meter_readings(meter)
+            if r.get("energy_type") in (None, "Pobrana")
+        ]
+        if readings:
+            latest = readings[0]
+            cons["meter_reading_kwh"] = latest["value_kwh"]
+            cons["meter_reading_date"] = latest["date"].isoformat()
+            cons["meter_reading_type"] = latest["read_type"]
+            if not cons.get("meter_serial"):
+                cons["meter_serial"] = latest.get("serial")
+        return cons
+
+    @staticmethod
+    def _consumption_stat_rows(
+        ku_consumption: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Details increments → statistics rows (same shape as hourly rows).
+
+        The newest chart category still accumulates until the next meter
+        reading closes it, so it is held back until a newer one appears.
+        """
+        details = (ku_consumption or {}).get("details_rows") or []
+        return [
+            {
+                "timestamp": datetime.combine(r["date"], datetime.min.time()),
+                "imported_kwh": r["kwh"],
+                "exported_kwh": 0.0,
+                "balance_kwh": r["kwh"],
+            }
+            for r in details[:-1]
+        ]
 
     async def _fetch_hourly(self, ku_id: str, ppe_id: str) -> list[dict[str, Any]]:
         """Fetch hourly readings for one PPE in chunks ≤ STATS_REPORT_MAX_DAYS days."""
