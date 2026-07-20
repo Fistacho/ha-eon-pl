@@ -118,7 +118,13 @@ class App:
                         self.coordinator.contracts, self.coordinator.last_hour
                     )
                 if ok and self.stats is not None:
-                    await self.stats.import_hourly(self.coordinator.fresh_rows)
+                    oze_keys = {
+                        k for k, c in self.coordinator.contracts.items()
+                        if c.get("has_oze", True)
+                    }
+                    await self.stats.import_hourly(
+                        self.coordinator.fresh_rows, oze_keys=oze_keys
+                    )
             finally:
                 self.state_store.record_fetch(datetime.now(timezone.utc), ok)
 
