@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from http.cookies import CookieError, SimpleCookie
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -18,6 +19,8 @@ from .const import (
     BASE_URL,
     COOKIE_NAME,
     ENDPOINT_BILLING,
+    ENDPOINT_COMPARE_YEAR,
+    ENDPOINT_DETAILS_CHART,
     ENDPOINT_KEEPALIVE,
     ENDPOINT_METER_READINGS,
     ENDPOINT_OZE_AGR,
@@ -136,6 +139,76 @@ def parse_oze_csv(raw: bytes) -> list[dict[str, Any]]:
     return out
 
 
+def parse_chart_rows(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Consumption chart JSON → [{date, kwh, legend_id}] sorted by date.
+
+    Both non-OZE chart endpoints (CompareYear / Details) share the shape:
+    Categories=["dd.mm.yyyy", ...], Results=[{X, Y, CategoryId, LegendId}].
+    """
+    rows: list[dict[str, Any]] = []
+    for r in (data or {}).get("Results") or []:
+        try:
+            d = datetime.strptime(str(r.get("CategoryId") or ""), "%d.%m.%Y").date()
+        except ValueError:
+            continue
+        y = r.get("Y")
+        if y is None:
+            continue
+        rows.append({"date": d, "kwh": float(y), "legend_id": r.get("LegendId")})
+    rows.sort(key=lambda r: r["date"])
+    return rows
+
+
+def parse_history_meters(html: str) -> list[dict[str, Any]]:
+    """Extract meter ids from the Historia-zuzycia meter <select>.
+
+    The portal renders <option value="<meterId>" data-type="active|inactive">
+    <serial></option> server-side; there is no JSON API for this list, and
+    GetDetailsEnergyConsumptionChartData returns empty Results without a
+    meterId param.
+    """
+    m = re.search(r'<select[^>]*name="meterId"[^>]*>(.*?)</select>', html, re.S)
+    if not m:
+        return []
+    out: list[dict[str, Any]] = []
+    for opt in re.finditer(
+        r'<option[^>]*value="(\d+)"[^>]*data-type="(\w+)"[^>]*>\s*([^<\s]*)',
+        m.group(1),
+    ):
+        out.append({
+            "meter_id": opt.group(1),
+            "active": opt.group(2) == "active",
+            "serial": opt.group(3),
+        })
+    return out
+
+
+def parse_meter_readings(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """GetMeterReadingsForKU JSON → [{date, value_kwh, read_type, serial}] newest first."""
+    out: list[dict[str, Any]] = []
+    for e in (data or {}).get("Result") or []:
+        # Prefer the portal-formatted date — the /Date(ms)/ epoch is Polish
+        # midnight, which shifts a day back when parsed in UTC.
+        try:
+            d = datetime.strptime(str(e.get("FormatedDate") or ""), "%d.%m.%Y").date()
+        except ValueError:
+            m = re.search(r"\d+", str(e.get("DateValue") or ""))
+            if not m:
+                continue
+            d = datetime.fromtimestamp(int(m.group(0)) / 1000).date()
+        readings = e.get("Readings") or []
+        raw_value = str((readings[0] or {}).get("read_value") or "") if readings else ""
+        out.append({
+            "date": d,
+            "value_kwh": _parse_pl_number(raw_value.replace("kWh", "")),
+            "read_type": e.get("Type"),
+            "serial": e.get("MeterSerial"),
+            "energy_type": e.get("EnergyType"),
+        })
+    out.sort(key=lambda r: r["date"], reverse=True)
+    return out
+
+
 class EonPolskaClient:
     """HTTP client for eon.pl Mój E.ON portal."""
 
@@ -194,9 +267,14 @@ class EonPolskaClient:
         if r.status_code != 200:
             raise EonApiError(f"HTTP {r.status_code} from {url}")
         try:
-            return r.json()
+            data = r.json()
         except Exception as exc:
             raise EonApiError(f"Non-JSON response from {url}: {r.text[:200]}") from exc
+        # The portal signals "endpoint not applicable to this account" with
+        # HTTP 200 {"Faulted": true} (e.g. /oze/* for consumption-only accounts).
+        if isinstance(data, dict) and data.get("Faulted"):
+            raise EonApiError(f"Faulted response from {url}")
+        return data
 
     async def keepalive(self) -> bool:
         page_headers = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
@@ -257,6 +335,30 @@ class EonPolskaClient:
 
     async def get_meter_readings(self) -> dict[str, Any]:
         return await self._get(ENDPOINT_METER_READINGS)
+
+    async def get_compare_year_data(self, ku: str) -> dict[str, Any]:
+        """Yearly billing-period consumption totals (non-OZE accounts)."""
+        return await self._get(ENDPOINT_COMPARE_YEAR, kuId=ku)
+
+    async def get_details_chart_data(self, ku: str, meter_id: str) -> dict[str, Any]:
+        """Per-meter-reading consumption increments (non-OZE accounts).
+
+        The server ignores any date/granulation params and returns a fixed
+        window (~2 years); meterId is required.
+        """
+        return await self._get(ENDPOINT_DETAILS_CHART, kuId=ku, meterId=meter_id)
+
+    async def get_history_page(self) -> str:
+        """Historia-zuzycia HTML — the only source of the meter-id list."""
+        client = await self._ensure_client()
+        r = await client.get(
+            PAGE_HISTORIA_ZUZYCIA,
+            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+        )
+        self._check_auth(r, PAGE_HISTORIA_ZUZYCIA)
+        if r.status_code != 200:
+            raise EonApiError(f"HTTP {r.status_code} from {PAGE_HISTORIA_ZUZYCIA}")
+        return r.text
 
     async def get_daily_readings(
         self,

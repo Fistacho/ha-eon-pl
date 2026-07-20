@@ -41,12 +41,25 @@ def build_app(
             ku = c.get("ku") or {}
             ppe = c.get("ppe") or {}
             last_hr = coordinator.last_hour.get(key, {})
+            if c.get("has_oze", True):
+                imported = last_hr.get("imported_kwh")
+                data_cell = f"{imported if imported is not None else '—'} kWh (ostatnia h)"
+                asof_cell = _fmt(last_hr.get("timestamp"))
+            else:
+                cons = c.get("consumption") or {}
+                cur = cons.get("current_period_kwh")
+                mtr = cons.get("meter_reading_kwh")
+                data_cell = (
+                    f"okres: {cur if cur is not None else '—'} kWh · "
+                    f"licznik: {mtr if mtr is not None else '—'} kWh"
+                )
+                asof_cell = cons.get("meter_reading_date") or "—"
             rows.append({
                 "key": key,
                 "ku_name": ku.get("KuDisplayName") or "?",
                 "ppe_name": ppe.get("PPEDisplayName") or "?",
-                "last_hour_imported": last_hr.get("imported_kwh"),
-                "last_hour_timestamp": _fmt(last_hr.get("timestamp")),
+                "data": data_cell,
+                "asof": asof_cell,
             })
 
         body = _render_html(
@@ -117,8 +130,8 @@ def _render_html(
 ) -> str:
     rows_html = "".join(
         f"<tr><td>{c['ku_name']}</td><td>{c['ppe_name']}</td>"
-        f"<td>{c['last_hour_imported'] or '—'} kWh</td>"
-        f"<td>{c['last_hour_timestamp']}</td></tr>"
+        f"<td>{c['data']}</td>"
+        f"<td>{c['asof']}</td></tr>"
         for c in contracts
     ) or "<tr><td colspan=4>brak danych — naciśnij <em>Pobierz dane</em></td></tr>"
     cookie_state = "✓ zapisany" if cookie_present else "✗ brak"
@@ -176,7 +189,7 @@ def _render_html(
 
 <h2>Liczniki</h2>
 <table>
-<thead><tr><th>KU</th><th>PPE</th><th>Pobrana (ostatnia h)</th><th>Timestamp</th></tr></thead>
+<thead><tr><th>KU</th><th>PPE</th><th>Dane</th><th>Stan na</th></tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
 

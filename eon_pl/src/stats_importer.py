@@ -45,9 +45,17 @@ class StatsImporter:
         self._state = state
 
     async def import_hourly(
-        self, fresh_rows: dict[str, list[dict[str, Any]]]
+        self,
+        fresh_rows: dict[str, list[dict[str, Any]]],
+        *,
+        oze_keys: set[str] | None = None,
     ) -> None:
-        """Import imported/exported energy stats per PPE."""
+        """Import imported/exported energy stats per PPE.
+
+        oze_keys=None keeps the historical behavior (every key gets both
+        statistics). Keys outside oze_keys are consumption-only accounts —
+        their exported series would be all zeros, so it is skipped.
+        """
         if not self._token:
             _LOGGER.warning("HA token missing, skipping statistics import")
             return
@@ -62,6 +70,8 @@ class StatsImporter:
                 rows=rows,
                 value_key="imported_kwh",
             )
+            if oze_keys is not None and key not in oze_keys:
+                continue
             await self._import_one(
                 statistic_id=_stat_id("exported", ppe),
                 name=f"E.ON Polska — wprowadzona {ppe}",
