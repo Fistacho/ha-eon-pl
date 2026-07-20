@@ -82,6 +82,7 @@ def test_meter_readings() -> None:
         "Result": [
             {
                 "DateValue": "/Date(1748642400000)/",
+                "FormatedDate": "31.05.2025",
                 "Type": "Odczyt zdalny",
                 "MeterSerial": "30870098",
                 "Readings": [{"read_type": "Całodobowa", "read_value": "5 715,30 kWh"}],
@@ -89,6 +90,7 @@ def test_meter_readings() -> None:
             },
             {
                 "DateValue": "/Date(1780178400000)/",
+                "FormatedDate": "31.05.2026",
                 "Type": "Odczyt zdalny",
                 "MeterSerial": "30870098",
                 "Readings": [{"read_type": "Całodobowa", "read_value": "14529,52 kWh"}],
@@ -98,7 +100,7 @@ def test_meter_readings() -> None:
     }
     rows = parse_meter_readings(data)
     assert rows[0]["value_kwh"] == 14529.52, rows  # newest first
-    assert rows[0]["date"].year == 2026
+    assert rows[0]["date"] == date(2026, 5, 31), rows  # FormatedDate, not UTC epoch
     assert rows[1]["value_kwh"] == 5715.30
     assert parse_meter_readings(None) == []
 

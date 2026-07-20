@@ -187,10 +187,15 @@ def parse_meter_readings(data: dict[str, Any] | None) -> list[dict[str, Any]]:
     """GetMeterReadingsForKU JSON → [{date, value_kwh, read_type, serial}] newest first."""
     out: list[dict[str, Any]] = []
     for e in (data or {}).get("Result") or []:
-        m = re.search(r"\d+", str(e.get("DateValue") or ""))
-        if not m:
-            continue
-        d = datetime.fromtimestamp(int(m.group(0)) / 1000).date()
+        # Prefer the portal-formatted date — the /Date(ms)/ epoch is Polish
+        # midnight, which shifts a day back when parsed in UTC.
+        try:
+            d = datetime.strptime(str(e.get("FormatedDate") or ""), "%d.%m.%Y").date()
+        except ValueError:
+            m = re.search(r"\d+", str(e.get("DateValue") or ""))
+            if not m:
+                continue
+            d = datetime.fromtimestamp(int(m.group(0)) / 1000).date()
         readings = e.get("Readings") or []
         raw_value = str((readings[0] or {}).get("read_value") or "") if readings else ""
         out.append({
