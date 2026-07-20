@@ -13,6 +13,10 @@ ENDPOINT_PAYMENTS = f"{API_BASE}/getpaymentsdata"
 ENDPOINT_KEEPALIVE = f"{API_BASE}/keepalive"
 ENDPOINT_LOGIN = f"{BASE_URL}/Logowanie"
 ENDPOINT_OZE_REPORT = f"{API_BASE}/sitecore/OzeReport/GenerateOzeReport"
+# Consumption chart endpoints used by the portal for non-OZE (consumption-only)
+# accounts. The /oze/* endpoints answer HTTP 200 {"Faulted": true} for them.
+ENDPOINT_COMPARE_YEAR = f"{API_BASE}/CompareYearEnergyConsumptionChartData"
+ENDPOINT_DETAILS_CHART = f"{API_BASE}/GetDetailsEnergyConsumptionChartData"
 PAGE_DASHBOARD = BASE_URL
 PAGE_HISTORIA_ZUZYCIA = f"{BASE_URL}/Historia-zuzycia"
 
