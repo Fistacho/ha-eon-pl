@@ -13,6 +13,9 @@ Automatyczne pobieranie zużycia energii z **Mój E.ON** do Home Assistant. Logi
 - **Year-to-date backfill** przy pierwszym uruchomieniu (chunki 60 dni).
 - **Live "ostatnia godzina"** sensors (`pobrana / wprowadzona / bilans`).
 - **Roczne agregaty** + **bieżący okres rozliczeniowy** z `GetBillingData` / `GetOzeAgrData`.
+- **Konta bez OZE** (zwykłe, konsumenckie) — wykrywane automatycznie po fladze `HasOze`:
+  sensory zużycia i stanu licznika + statystyki przyrostów zużycia per odczyt licznika
+  (portal nie udostępnia wtedy danych godzinowych ani endpointów `/oze/*`).
 - **MQTT auto-discovery** — encje pojawiają się w HA same.
 - **Web UI ingress** — status sesji, ostatni login, ręczny refresh.
 - Self-healing: keepalive co 5 min, automatyczne re-login co 12 h lub przy 302 do `/Logowanie`.
@@ -50,6 +53,8 @@ Jeśli automatyczne logowanie kończy się błędem reCAPTCHA, ustaw `manual_coo
 
 ## Encje (per KU+PPE)
 
+Konto **z OZE** (prosument):
+
 | Encja | Typ | Źródło |
 | --- | --- | --- |
 | `sensor.eon_<key>_consumption_current_period` | total_increasing kWh | `GetBillingData` |
@@ -60,10 +65,19 @@ Jeśli automatyczne logowanie kończy się błędem reCAPTCHA, ustaw `manual_coo
 | `sensor.eon_<key>_last_hour_exported` | total kWh | hourly CSV |
 | `sensor.eon_<key>_last_hour_balance` | total kWh | hourly CSV |
 
+Konto **bez OZE** (tylko pobór):
+
+| Encja | Typ | Źródło |
+| --- | --- | --- |
+| `sensor.eon_<key>_consumption_current_period` | total_increasing kWh | `CompareYearEnergyConsumptionChartData` (bieżący okres rozliczeniowy) |
+| `sensor.eon_<key>_meter_reading` | total_increasing kWh | `GetMeterReadingsForKU` (data i typ odczytu w atrybutach) |
+
 Plus **external statistics** (Energy Dashboard):
 
-- `eon_pl:imported_<PPE>` — godzinowy kumulowany pobór
-- `eon_pl:exported_<PPE>` — godzinowy kumulowany eksport
+- `eon_pl:imported_<PPE>` — kumulowany pobór: godzinowy (OZE) albo przyrosty per
+  odczyt licznika, zwykle miesięczne (bez OZE; najnowszy, jeszcze niezamknięty
+  okres jest wstrzymywany do czasu kolejnego odczytu)
+- `eon_pl:exported_<PPE>` — godzinowy kumulowany eksport (tylko OZE)
 
 ## Energy Dashboard
 

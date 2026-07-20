@@ -2,6 +2,21 @@
 
 Automatyczne pobieranie zużycia energii z portalu **Mój E.ON** (eon.pl) do Home Assistant Energy Dashboard.
 
+## Typy kont
+
+Addon wykrywa typ konta automatycznie (flaga `HasOze` z `GetPHList`):
+
+- **Konto z OZE (prosument)** — pełny zestaw: billing, agregaty OZE, godzinowe
+  CSV → statystyki godzinowe imported/exported.
+- **Konto bez OZE (zwykłe)** — portal nie udostępnia danych godzinowych ani
+  endpointów `/oze/*` (zwracają `{"Faulted": true}`). Addon używa wtedy wykresów
+  Historii zużycia (`CompareYearEnergyConsumptionChartData`,
+  `GetDetailsEnergyConsumptionChartData`) i stanów licznika
+  (`GetMeterReadingsForKU`): publikuje sensory *Zużycie (bieżący okres
+  rozliczeniowy)* i *Stan licznika* oraz statystykę `eon_pl:imported_<PPE>`
+  z przyrostami per odczyt licznika (zwykle miesięcznymi). Najnowszy,
+  jeszcze niezamknięty okres trafia do statystyk dopiero po kolejnym odczycie.
+
 ## Configuration
 
 ```yaml
