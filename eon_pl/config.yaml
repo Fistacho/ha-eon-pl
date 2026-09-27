@@ -1,7 +1,7 @@
 name: E.ON Polska
-version: "1.2.1"
+version: "1.2.2"
 slug: eon_pl
-description: "Automatyczne pobieranie zużycia energii z Mój E.ON do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
+description: "Nieoficjalny scraper Mój E.ON (automatyzacja przeglądarki, nie jest to integracja API) do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
 url: https://github.com/Fistacho/ha-eon-pl
 arch:
   - aarch64
@@ -9,9 +9,8 @@ arch:
 init: false
 startup: services
 hassio_api: true
-hassio_role: manager
+hassio_role: default
 homeassistant_api: true
-auth_api: true
 
 services:
   - mqtt:want
@@ -49,12 +48,12 @@ schema:
   capsolver_api_key: password?
   manual_cookie_only: bool
 
-ports:
-  8099/tcp: 8099
-
-ports_description:
-  8099/tcp: E.ON Polska Web UI
-
+# Web UI wystawiony wyłącznie przez Ingress (autentykacja przez sesję HA).
+# Brak jawnego `ports:` — endpoint /set_cookie w web_server.py nie ma własnej
+# autoryzacji, więc publikowanie 8099 bezpośrednio na hosta pozwoliłoby każdemu
+# w sieci LAN wstrzyknąć dowolne ciasteczko sesji E.ON bez logowania do HA.
+# Domyślny ingress_port to 8099 (zgodnie z konwencją Supervisora), więc appka
+# nasłuchująca na 0.0.0.0:8099 działa bez zmian w kodzie.
 ingress: true
 panel_icon: mdi:lightning-bolt-circle
 panel_title: E.ON Polska

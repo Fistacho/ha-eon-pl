@@ -61,7 +61,7 @@ class App:
     # ---------------- bootstrap ----------------
 
     async def ensure_cookie(self) -> str:
-        """Return a valid cookie. Try persisted one first; fallback to Selenium."""
+        """Return a valid cookie. Try persisted one first; fallback to browser login."""
         cookie, _ = self.cookie_store.load()
         if cookie:
             client = EonPolskaClient(cookie)
@@ -85,14 +85,14 @@ class App:
         return await self.relogin()
 
     async def relogin(self) -> str:
-        """Always launches Selenium. Saves the new cookie."""
+        """Always launches the nodriver browser login. Saves the new cookie."""
         if self.rt.options.manual_cookie_only:
             raise LoginError(
                 "manual_cookie_only=true — paste .AspNet.Cookies in Web UI instead "
-                "of using Selenium login"
+                "of using the automated browser login"
             )
         async with self._login_lock:
-            _LOGGER.info("Launching Selenium login...")
+            _LOGGER.info("Launching browser login (nodriver/Chromium)...")
             cookie = await login_with_retry(
                 self.rt.options.email,
                 self.rt.options.password,
@@ -304,7 +304,7 @@ class App:
         asyncio.create_task(self.loop_keepalive())
         asyncio.create_task(self.loop_fetch())
         if self.rt.options.manual_cookie_only:
-            _LOGGER.info("manual_cookie_only=true — periodic Selenium re-login disabled")
+            _LOGGER.info("manual_cookie_only=true — periodic browser re-login disabled")
         else:
             asyncio.create_task(self.loop_relogin())
 

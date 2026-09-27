@@ -164,7 +164,7 @@ def _render_html(
 <details{details_open}>
 <summary>Ręczne wklejenie ciasteczka (obejście reCAPTCHA)</summary>
 <p class="hint">
-  Jeśli Selenium nie może się zalogować przez reCAPTCHA:<br>
+  Jeśli automatyczne logowanie (Chromium) nie przejdzie reCAPTCHA:<br>
   1. Zaloguj się ręcznie na <strong>eon.pl</strong> w przeglądarce.<br>
   2. Otwórz DevTools (F12) → <em>Application</em> → <em>Cookies</em> → <code>https://www.eon.pl</code>.<br>
   3. Skopiuj wartość ciasteczka <code>.AspNet.Cookies</code> albo cały nagłówek <code>Cookie</code> dla <code>eon.pl</code>.<br>

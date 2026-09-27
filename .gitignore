@@ -3,3 +3,10 @@ test_local.env
 .venv/
 __pycache__/
 *.pyc
+
+# Selenium runtime profile (session/cookies — never commit)
+chrome_profile/
+
+# Debug artifacts (login page dumps/screenshots)
+login_debug_*.html
+login_debug_*.png
