@@ -1,5 +1,5 @@
 name: E.ON Polska
-version: "1.2.2"
+version: "1.2.3"
 slug: eon_pl
 description: "Nieoficjalny scraper Mój E.ON (automatyzacja przeglądarki, nie jest to integracja API) do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
 url: https://github.com/Fistacho/ha-eon-pl

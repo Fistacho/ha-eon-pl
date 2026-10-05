@@ -17,6 +17,7 @@ import asyncio
 import logging
 import signal
 from datetime import datetime, timezone
+from typing import Awaitable, Callable, TypeVar
 
 from aiohttp import web
 
@@ -27,16 +28,31 @@ from .const import KEEPALIVE_INTERVAL_MINUTES
 from .cookie_store import CookieStore
 from .coordinator import EonCoordinator
 from .mqtt_publisher import MqttConfig, MqttPublisher
+from .retry import TRANSIENT_ERRORS, RetryAborted, retry_transient
 from .state_store import StateStore
 from .stats_importer import StatsImporter
 from .web_server import build_app
 
 _LOGGER = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 
 class App:
-    def __init__(self, runtime: Runtime) -> None:
+    def __init__(
+        self,
+        runtime: Runtime,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
         self.rt = runtime
+        # Set by SIGTERM/SIGINT; also wakes every backoff wait immediately.
+        self._stop = asyncio.Event()
+        # Backoff sleep for network retries (injectable for tests).
+        self._sleep = sleep or self._interruptible_sleep
+        # True when the first fetch could not run because of a network error;
+        # loop_fetch then retries right away instead of waiting a full interval.
+        self._fetch_due = False
+        self._tasks: list[asyncio.Task] = []
         self.cookie_store = CookieStore(runtime.data_dir)
         self.state_store = StateStore(runtime.data_dir)
         self.client: EonPolskaClient | None = None
@@ -45,6 +61,21 @@ class App:
         self.stats: StatsImporter | None = None
         self._fetch_lock = asyncio.Lock()
         self._login_lock = asyncio.Lock()
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    async def _interruptible_sleep(self, delay: float) -> None:
+        """Sleep ``delay`` s, returning early when a stop is requested."""
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _retry_network(self, op: Callable[[], Awaitable[T]], what: str) -> T:
+        return await retry_transient(
+            op, what=what, sleep=self._sleep, should_stop=self._stop.is_set
+        )
 
     def _persist_current_cookie(self, reason: str) -> None:
         """Persist a renewed auth cookie if E.ON rotated it in Set-Cookie."""
@@ -66,7 +97,11 @@ class App:
         if cookie:
             client = EonPolskaClient(cookie)
             try:
-                if await client.validate_session():
+                # Network/portal outage is retried here; only a definite
+                # "session dead" answer (False) falls through to browser login.
+                if await self._retry_network(
+                    client.validate_session, "E.ON session check"
+                ):
                     refreshed_cookie = client.auth_cookie or cookie
                     if refreshed_cookie != cookie:
                         self.cookie_store.save(refreshed_cookie)
@@ -170,14 +205,23 @@ class App:
                         )
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug("keepalive error: %s", exc)
-            await asyncio.sleep(KEEPALIVE_INTERVAL_MINUTES * 60)
+            await self._interruptible_sleep(KEEPALIVE_INTERVAL_MINUTES * 60)
 
     async def loop_fetch(self) -> None:
         interval = self.rt.options.scan_interval_hours * 3600
-        while True:
-            await asyncio.sleep(interval)
+        while not self._stop.is_set():
+            if self._fetch_due:
+                self._fetch_due = False
+            else:
+                await self._interruptible_sleep(interval)
+                if self._stop.is_set():
+                    return
             try:
-                await self.fetch_once()
+                # Network errors are retried with backoff instead of losing
+                # the whole scan interval (and a traceback) on a DNS hiccup.
+                await self._retry_network(self.fetch_once, "E.ON fetch")
+            except RetryAborted:
+                return
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.exception("Periodic fetch failed: %s", exc)
 
@@ -190,16 +234,28 @@ class App:
                 if self.client is not None:
                     self.client.set_cookie(cookie)
                 _LOGGER.info("Periodic re-login OK")
-            except LoginError as exc:
+            except Exception as exc:  # noqa: BLE001
+                # Never let this task die silently — it would stop all
+                # future periodic re-logins.
                 _LOGGER.error("Periodic re-login failed: %s", exc)
 
     # ---------------- run ----------------
 
     async def run(self) -> None:
         _LOGGER.info("E.ON Polska addon starting...")
+        # Install signal handlers first so SIGTERM also interrupts the
+        # network-wait below (otherwise it would only apply at the very end).
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                asyncio.get_running_loop().add_signal_handler(sig, self._stop.set)
+            except NotImplementedError:
+                pass
         cookie = ""
         try:
             cookie = await self.ensure_cookie()
+        except RetryAborted:
+            _LOGGER.info("Stop requested while waiting for network — exiting")
+            return
         except LoginError as exc:
             _LOGGER.error(
                 "Initial login failed: %s — starting in degraded mode, "
@@ -271,6 +327,12 @@ class App:
         if cookie:
             try:
                 await self.fetch_once()
+            except TRANSIENT_ERRORS as exc:
+                _LOGGER.warning(
+                    "Initial fetch postponed — network unavailable (%s: %s); "
+                    "retrying in background", type(exc).__name__, exc,
+                )
+                self._fetch_due = True
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.exception("Initial fetch failed: %s", exc)
         else:
@@ -301,22 +363,19 @@ class App:
         _LOGGER.info("Web UI listening on 0.0.0.0:8099")
 
         # Background loops
-        asyncio.create_task(self.loop_keepalive())
-        asyncio.create_task(self.loop_fetch())
+        self._tasks.append(asyncio.create_task(self.loop_keepalive()))
+        self._tasks.append(asyncio.create_task(self.loop_fetch()))
         if self.rt.options.manual_cookie_only:
             _LOGGER.info("manual_cookie_only=true — periodic browser re-login disabled")
         else:
-            asyncio.create_task(self.loop_relogin())
+            self._tasks.append(asyncio.create_task(self.loop_relogin()))
 
-        # Block forever
-        stop = asyncio.Event()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                asyncio.get_running_loop().add_signal_handler(sig, stop.set)
-            except NotImplementedError:
-                pass
-        await stop.wait()
+        # Block until SIGTERM/SIGINT
+        await self._stop.wait()
         _LOGGER.info("Shutting down")
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
         await runner.cleanup()
         if self.mqtt is not None:
             await self.mqtt.publish_offline(self.coordinator.contracts if self.coordinator else {})

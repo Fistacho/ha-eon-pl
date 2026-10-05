@@ -85,6 +85,15 @@ class EonApiError(Exception):
     """Unexpected API response."""
 
 
+class EonTransientError(EonApiError):
+    """Portal answered 429/5xx — an outage on their side, not a dead session.
+
+    Subclasses EonApiError so existing handlers keep working; only
+    validate_session() lets it through so callers can retry instead of
+    mistaking it for an expired cookie (which would start a browser login).
+    """
+
+
 def _parse_pl_number(s: str) -> float:
     s = (s or "").strip().replace("\xa0", "").replace(" ", "")
     if not s:
@@ -191,6 +200,8 @@ class EonPolskaClient:
         client = await self._ensure_client()
         r = await client.get(url, params=params or None)
         self._check_auth(r, url)
+        if r.status_code == 429 or r.status_code >= 500:
+            raise EonTransientError(f"HTTP {r.status_code} from {url}")
         if r.status_code != 200:
             raise EonApiError(f"HTTP {r.status_code} from {url}")
         try:
@@ -224,6 +235,8 @@ class EonPolskaClient:
         try:
             data = await self._get(ENDPOINT_PH_LIST)
             return bool(data.get("Partners"))
+        except EonTransientError:
+            raise  # portal outage != dead session; caller retries
         except (EonAuthError, EonApiError):
             return False
 

@@ -138,6 +138,10 @@ Sprawdź **Logs** addona. Najczęstsze przyczyny:
 - captcha-blok → odczekaj 30 min, spróbuj ponownie
 - bez CapSolvera → ustaw `manual_cookie_only: true` i wklej `.AspNet.Cookies` albo pełny nagłówek `Cookie` w Web UI
 
+### Brak sieci / DNS po restarcie hosta
+
+Od 1.2.3 addon nie kończy pracy, gdy sieć lub DNS hosta nie są jeszcze gotowe (np. tuż po restarcie): czeka i ponawia zapytanie z rosnącym odstępem (5 s → max 5 min). W logu pojawi się jedno ostrzeżenie z przyczyną, a po odzyskaniu połączenia komunikat `connection restored`. Brak sieci nigdy nie uruchamia logowania przeglądarką — tylko odpowiedź portalu "sesja nieważna" (401/przekierowanie do logowania/brak danych).
+
 ### Brak danych godzinowych
 
 E.ON publikuje hourly readings z 24–48 h opóźnieniem. Dane sprzed 3+ dni powinny być zawsze dostępne.
