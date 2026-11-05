@@ -15,6 +15,7 @@ from .const import (
     STATS_BACKFILL_DAYS_FALLBACK,
     STATS_BACKFILL_FROM_YEAR_START,
     STATS_REPORT_MAX_DAYS,
+    STATS_REVISION_DAYS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -198,7 +199,8 @@ class EonCoordinator:
 
         anchor = self._last_anchor.get(key)
         if anchor is not None:
-            return anchor.date() - timedelta(days=3), date_to
+            # Re-read the days the importer may still revise (provisional data).
+            return anchor.date() - timedelta(days=STATS_REVISION_DAYS), date_to
 
         if STATS_BACKFILL_FROM_YEAR_START:
             return date(today.year, 1, 1), date_to

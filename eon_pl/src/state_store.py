@@ -4,11 +4,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
+
+# 1 (implicit, eon_pl <= 1.3.0): anchors only. Statistics written by it may
+# hold provisional portal values that were never revised.
+# 2: anchors + per-day checkpoints for re-importing revised days.
+STATS_STATE_VERSION = 2
 
 
 class StateStore:
@@ -17,6 +22,17 @@ class StateStore:
     def __init__(self, data_dir: str) -> None:
         self._path = Path(data_dir) / "state.json"
         self._data: dict[str, Any] = self._load()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Mark statistics written by version 1 for one full re-import.
+
+        Persisted with the next save; repeating it before then is harmless.
+        """
+        if int(self._data.get("stats_version") or 1) >= STATS_STATE_VERSION:
+            return
+        self._data["stats_full_reimport"] = sorted((self._data.get("stats") or {}).keys())
+        self._data["stats_version"] = STATS_STATE_VERSION
 
     def _load(self) -> dict[str, Any]:
         if not self._path.exists():
@@ -40,12 +56,38 @@ class StateStore:
         ts = datetime.fromisoformat(ts_str) if ts_str else None
         return float(a.get("last_sum") or 0.0), ts
 
-    def update_stats_anchor(self, stat_id: str, last_sum: float, last_start: datetime) -> None:
+    def stats_checkpoints(self, stat_id: str) -> dict[date, tuple[float, float]]:
+        """Per local day: (sum before the day's first hour, factor it was imported with)."""
+        a = (self._data.get("stats") or {}).get(stat_id) or {}
+        return {
+            date.fromisoformat(d): (float(v[0]), float(v[1]))
+            for d, v in (a.get("days") or {}).items()
+        }
+
+    def update_stats_anchor(
+        self,
+        stat_id: str,
+        last_sum: float,
+        last_start: datetime,
+        checkpoints: dict[date, tuple[float, float]] | None = None,
+    ) -> None:
         self._data.setdefault("stats", {})[stat_id] = {
             "last_sum": last_sum,
             "last_start": last_start.isoformat(),
+            "days": {
+                d.isoformat(): [s, f] for d, (s, f) in sorted((checkpoints or {}).items())
+            },
         }
         self._save()
+
+    def full_reimport_pending(self, stat_id: str) -> bool:
+        return stat_id in (self._data.get("stats_full_reimport") or [])
+
+    def clear_full_reimport(self, stat_id: str) -> None:
+        pending = self._data.get("stats_full_reimport") or []
+        if stat_id in pending:
+            self._data["stats_full_reimport"] = [s for s in pending if s != stat_id]
+            self._save()
 
     # ---- session tracking ----
 

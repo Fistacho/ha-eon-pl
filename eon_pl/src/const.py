@@ -25,6 +25,12 @@ DOMAIN = "eon_pl"
 # if a chunk including the last day comes back as a 302 (data not yet
 # published) the per-chunk retry will still surface earlier days.
 HOURLY_DATE_OFFSET_DAYS = 2
+# The newest days are provisional: eon.pl may serve substitute values (seen:
+# a copy of the same weekday 4 weeks earlier) and replaces them with real
+# readings later. Every fetch re-reads and re-imports this many days before
+# the last imported one, so revisions within the window overwrite the
+# statistics. Must stay below STATS_REPORT_MAX_DAYS (one report request).
+STATS_REVISION_DAYS = 30
 STATS_REPORT_MAX_DAYS = 60
 STATS_BACKFILL_FROM_YEAR_START = True
 STATS_BACKFILL_DAYS_FALLBACK = 30
