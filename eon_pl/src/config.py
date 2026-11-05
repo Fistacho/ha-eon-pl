@@ -38,6 +38,9 @@ class AddonOptions:
     ha_token: str = ""
     capsolver_api_key: str = ""
     manual_cookie_only: bool = False
+    # PLN/kWh used to build cost statistics for Energy Dashboard; 0 = disabled.
+    price_import_pln_kwh: float = 0.0
+    value_export_pln_kwh: float = 0.0
 
     @classmethod
     def load(cls, path: str | None = None) -> "AddonOptions":
@@ -59,6 +62,8 @@ class AddonOptions:
             ha_token=str(raw.get("ha_token", "")).strip(),
             capsolver_api_key=str(raw.get("capsolver_api_key", "")).strip(),
             manual_cookie_only=_as_bool(raw.get("manual_cookie_only"), False),
+            price_import_pln_kwh=float(raw.get("price_import_pln_kwh") or 0.0),
+            value_export_pln_kwh=float(raw.get("value_export_pln_kwh") or 0.0),
         )
 
 

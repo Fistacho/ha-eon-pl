@@ -1,5 +1,5 @@
 name: E.ON Polska
-version: "1.2.3"
+version: "1.3.0"
 slug: eon_pl
 description: "Nieoficjalny scraper Mój E.ON (automatyzacja przeglądarki, nie jest to integracja API) do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
 url: https://github.com/Fistacho/ha-eon-pl
@@ -29,6 +29,8 @@ options:
   ha_token: ""
   capsolver_api_key: ""
   manual_cookie_only: false
+  price_import_pln_kwh: 0
+  value_export_pln_kwh: 0
 
 schema:
   email: email
@@ -46,6 +48,8 @@ schema:
   ha_token: password?
   capsolver_api_key: password?
   manual_cookie_only: bool
+  price_import_pln_kwh: float(0,)
+  value_export_pln_kwh: float(0,)
 
 # Web UI wystawiony wyłącznie przez Ingress (autentykacja przez sesję HA).
 # Brak jawnego `ports:` — endpoint /set_cookie w web_server.py nie ma własnej

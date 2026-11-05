@@ -39,15 +39,25 @@ def _stat_id(kind: str, ppe: str) -> str:
 
 
 class StatsImporter:
-    def __init__(self, ha_url: str, ha_token: str, state: StateStore) -> None:
+    def __init__(
+        self,
+        ha_url: str,
+        ha_token: str,
+        state: StateStore,
+        price_import_pln_kwh: float = 0.0,
+        value_export_pln_kwh: float = 0.0,
+    ) -> None:
         self._url = ha_url.rstrip("/")
         self._token = ha_token
         self._state = state
+        # PLN per kWh; 0 (or less) disables the matching cost statistic.
+        self._price_import = price_import_pln_kwh
+        self._value_export = value_export_pln_kwh
 
     async def import_hourly(
         self, fresh_rows: dict[str, list[dict[str, Any]]]
     ) -> None:
-        """Import imported/exported energy stats per PPE."""
+        """Import imported/exported energy (kWh) and optional cost (PLN) stats per PPE."""
         if not self._token:
             _LOGGER.warning("HA token missing, skipping statistics import")
             return
@@ -68,6 +78,27 @@ class StatsImporter:
                 rows=rows,
                 value_key="exported_kwh",
             )
+            # Cost statistics for Energy Dashboard (stat_cost / stat_compensation).
+            # HA does not price external statistics itself, so we push PLN sums.
+            # A price change only affects hours newer than the PLN anchor.
+            if self._price_import > 0:
+                await self._import_one(
+                    statistic_id=_stat_id("imported_cost", ppe),
+                    name=f"E.ON Polska — koszt poboru {ppe}",
+                    rows=rows,
+                    value_key="imported_kwh",
+                    factor=self._price_import,
+                    unit="PLN",
+                )
+            if self._value_export > 0:
+                await self._import_one(
+                    statistic_id=_stat_id("exported_compensation", ppe),
+                    name=f"E.ON Polska — wartość oddanej {ppe}",
+                    rows=rows,
+                    value_key="exported_kwh",
+                    factor=self._value_export,
+                    unit="PLN",
+                )
 
     async def _import_one(
         self,
@@ -75,7 +106,10 @@ class StatsImporter:
         name: str,  # kept for API compat / log labeling, not sent in payload
         rows: list[dict[str, Any]],
         value_key: str,
+        factor: float = 1.0,
+        unit: str = "kWh",
     ) -> None:
+        """Import one cumulative statistic: per-hour value = row[value_key] × factor."""
         last_sum, last_start = self._state.stats_anchor(statistic_id)
         running = last_sum
         stats: list[dict[str, Any]] = []
@@ -89,7 +123,7 @@ class StatsImporter:
             ts_utc = ts.astimezone(timezone.utc)
             if last_start is not None and ts_utc <= last_start:
                 continue
-            v = float(r.get(value_key) or 0.0)
+            v = float(r.get(value_key) or 0.0) * factor
             running += v
             stats.append({"start": ts_utc.isoformat(), "state": v, "sum": running})
             latest_ts = ts_utc
@@ -102,7 +136,7 @@ class StatsImporter:
             "name": name,
             "source": DOMAIN,
             "statistic_id": statistic_id,
-            "unit_of_measurement": "kWh",
+            "unit_of_measurement": unit,
         }
         ok, err = await self._ws_import(metadata, stats)
         if not ok:

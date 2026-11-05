@@ -282,7 +282,13 @@ class App:
                     "Stats importer has no token — set ha_token in addon options "
                     "(Profile → Security → Long-Lived Access Tokens)"
                 )
-        self.stats = StatsImporter(stats_url, stats_token, self.state_store)
+        self.stats = StatsImporter(
+            stats_url,
+            stats_token,
+            self.state_store,
+            price_import_pln_kwh=self.rt.options.price_import_pln_kwh,
+            value_export_pln_kwh=self.rt.options.value_export_pln_kwh,
+        )
 
         # Connect MQTT (only if discovery enabled and broker reachable).
         # Resolution order:

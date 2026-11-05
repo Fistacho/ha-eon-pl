@@ -41,6 +41,8 @@
    selected_kus: []          # puste = wszystkie aktywne KU
    log_level: info
    mqtt_discovery: true
+   price_import_pln_kwh: 0   # zł/kWh brutto, >0 = statystyka kosztu poboru
+   value_export_pln_kwh: 0   # zł/kWh brutto, >0 = statystyka wartości oddanej
    ```
 
 5. **Start**
@@ -79,14 +81,18 @@ Plus **external statistics** (Energy Dashboard):
 
 - `eon_pl:imported_<PPE>` — godzinowy kumulowany pobór
 - `eon_pl:exported_<PPE>` — godzinowy kumulowany eksport
+- `eon_pl:imported_cost_<PPE>` — kumulowany koszt poboru w PLN (gdy `price_import_pln_kwh` > 0)
+- `eon_pl:exported_compensation_<PPE>` — kumulowana wartość energii oddanej w PLN (gdy `value_export_pln_kwh` > 0)
 
 ## Energy Dashboard
 
 **Settings → Dashboards → Energy**:
 
-- **Electricity grid → Add consumption** → `eon_pl:imported_<PPE>`
-- **Electricity grid → Add return** → `eon_pl:exported_<PPE>`
+- **Electricity grid → Add consumption** → `eon_pl:imported_<PPE>`, koszt: „Użyj encji śledzącej całkowite koszty” → `eon_pl:imported_cost_<PPE>` (`stat_cost`)
+- **Electricity grid → Add return** → `eon_pl:exported_<PPE>`, wartość: `eon_pl:exported_compensation_<PPE>` (`stat_compensation`)
 - **Solar panels → Add solar production** → encja Twojego inwertera
+
+Koszt (`price_import_pln_kwh` / `value_export_pln_kwh`) — jak policzyć cenę z faktury, net-metering i ograniczenia (bez opłat stałych, zmiana ceny tylko na nowe godziny): [DOCS.md → Koszt energii](./eon_pl/DOCS.md#koszt-energii).
 
 ## Architektura
 

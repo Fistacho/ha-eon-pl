@@ -13,6 +13,8 @@ manual_cookie_only: false  # true = nie uruchamiaj przeglądarki (nodriver), uż
 selected_kus: []           # lista KU ID (puste = wszystkie aktywne)
 log_level: info            # debug | info | warning | error
 mqtt_discovery: true       # publikuj encje przez MQTT auto-discovery
+price_import_pln_kwh: 0    # zł/kWh brutto za pobraną energię (0 = bez statystyki kosztu)
+value_export_pln_kwh: 0    # zł/kWh brutto za oddaną energię (0 = bez statystyki wartości)
 
 # Opcjonalne — używane gdy Protection mode jest WŁĄCZONY i Supervisor nie
 # wstrzykuje tokenu (najczęstszy scenariusz). Wystarczy raz wpisać.
@@ -74,6 +76,10 @@ Lista numerów konta umowy (KU) do śledzenia. Pozostaw puste żeby śledzić ws
 
 Aby znaleźć ID swojego KU: po pierwszym uruchomieniu addona otwórz **Web UI** → tam są wylistowane wszystkie aktywne KU + PPE.
 
+### price_import_pln_kwh / value_export_pln_kwh
+
+Cena (zł/kWh, brutto) używana do statystyk kosztu w Energy Dashboard — patrz [Koszt energii](#koszt-energii). Default: `0` = wyłączone (addon importuje wtedy tylko kWh, jak dotychczas).
+
 ## Web UI
 
 Po starcie addona kliknij **Open Web UI**. Zobaczysz:
@@ -120,12 +126,53 @@ Jeśli nie chcesz polegać na automatyzacji przeglądarki ani na CapSolverze, us
 
 ## Energy Dashboard
 
-External statistics są wysyłane przez REST API do recorder HA:
+External statistics są wysyłane przez WebSocket `recorder/import_statistics` do recordera HA:
 
-- `eon_pl:imported_<PPE>` — godzinowy kumulowany pobór z sieci
-- `eon_pl:exported_<PPE>` — godzinowy kumulowany oddanie do sieci
+- `eon_pl:imported_<PPE>` — godzinowy kumulowany pobór z sieci (kWh)
+- `eon_pl:exported_<PPE>` — godzinowy kumulowany oddanie do sieci (kWh)
+- `eon_pl:imported_cost_<PPE>` — kumulowany koszt poboru (PLN), tylko gdy `price_import_pln_kwh` > 0
+- `eon_pl:exported_compensation_<PPE>` — kumulowana wartość energii oddanej (PLN), tylko gdy `value_export_pln_kwh` > 0
 
 Konfiguruj w **Settings → Dashboards → Energy → Electricity grid**.
+
+### Koszt energii
+
+Energy Dashboard **nie liczy** kosztu ze stałej ceny („Użyj stałej ceny”) dla statystyk zewnętrznych (`eon_pl:...`) — robi to tylko dla encji. Dlatego addon może sam zaimportować koszt jako osobne statystyki w PLN: wartość każdej godziny = kWh z tej godziny × cena z opcji.
+
+Podepnij je przy źródle sieci (**Electricity grid**):
+
+- pobór `eon_pl:imported_<PPE>` → opcja „Użyj encji/statystyki śledzącej całkowite koszty” → `eon_pl:imported_cost_<PPE>` (w `energy` prefs: `stat_cost`),
+- oddanie `eon_pl:exported_<PPE>` → analogicznie → `eon_pl:exported_compensation_<PPE>` (w `energy` prefs: `stat_compensation`).
+
+#### Jak policzyć `price_import_pln_kwh` z faktury
+
+Zsumuj wszystkie **stawki zmienne za kWh** (netto) z faktury i pomnóż przez VAT **1,23**. Przykład (stawki przykładowe, weź swoje z faktury):
+
+| Składnik (zł/kWh netto) | Stawka |
+| --- | --- |
+| energia czynna | 0,5000 |
+| opłata sieciowa zmienna (dystrybucja) | 0,3000 |
+| opłata jakościowa | 0,0300 |
+| opłata OZE | 0,0040 |
+| opłata kogeneracyjna | 0,0060 |
+| **suma netto** | **0,8400** |
+
+`price_import_pln_kwh = 0,8400 × 1,23 = 1,0332` → wpisz `1.0332`.
+
+#### Jak policzyć `value_export_pln_kwh` (net-metering)
+
+W net-meteringu ze współczynnikiem **0,8** każda oddana kWh daje 0,8 kWh do odebrania bez opłat za energię, sieciową zmienną i jakościową, więc:
+
+`value_export_pln_kwh = 0,8 × (energia + sieciowa zmienna + jakościowa) × 1,23`
+
+Dla stawek z tabeli: `0,8 × (0,5000 + 0,3000 + 0,0300) × 1,23 = 0,81672` → wpisz `0.81672`. (Przy współczynniku 0,7 zamień 0,8 na 0,7. W net-billingu wpisz średnią cenę, po której rozliczana jest energia oddana.) To przybliżenie: realny net-metering rozlicza kilowatogodziny w okresie 12 miesięcy, a nie złotówki.
+
+#### Ograniczenia
+
+- **Opłaty stałe nie są wliczone** (handlowa, sieciowa stała, przejściowa, abonamentowa, mocowa ryczałtowa) — statystyki liczą tylko część zależną od kWh.
+- **Zmiana ceny działa tylko na nowe godziny.** Sumy już zaimportowane nie są przeliczane — od momentu zmiany kolejne godziny są doliczane po nowej cenie do dotychczasowej sumy. Każda statystyka (kWh i PLN) ma własną kotwicę sumy, więc włączenie ceny nie wpływa na statystyki kWh.
+- Po pierwszym włączeniu ceny (zapis opcji = restart addonu) pierwszy fetch pobiera dane od 1 stycznia bieżącego roku, więc koszt zostanie policzony wstecz po bieżącej cenie.
+- Taryfy wielostrefowe (G12, G12w…) — jedna cena dla wszystkich godzin, więc wpisz średnią ważoną albo traktuj wynik jako szacunek.
 
 ## Troubleshooting
 
