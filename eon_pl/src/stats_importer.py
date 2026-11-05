@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 from datetime import date, datetime, timedelta, timezone
+from itertools import pairwise
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -38,13 +39,49 @@ def _stat_id(kind: str, ppe: str) -> str:
     return f"{DOMAIN}:{kind}_{ppe}"
 
 
-def _local(ts: datetime) -> datetime:
-    # CSV timestamps from eon.pl are bare local Polish time; localize them.
-    return ts.replace(tzinfo=_LOCAL_TZ) if ts.tzinfo is None else ts.astimezone(_LOCAL_TZ)
+def _hour_start_utc(ts: datetime) -> datetime:
+    """UTC start of the CSV hour whose bare local start (label - 1 h) is `ts`.
+
+    eon.pl labels each hour by the local hour it ends at and always sends 24
+    rows per day. Resolving the end keeps the DST days right: on the spring
+    day the row ending at the non-existent 02:00 (a zero placeholder) falls on
+    the same hour as the next row; on the autumn day the repeated hour has no
+    row. Any other hour is unchanged.
+    """
+    if ts.tzinfo is not None:
+        return ts.astimezone(timezone.utc)
+    end = (ts + timedelta(hours=1)).replace(tzinfo=_LOCAL_TZ)
+    return end.astimezone(timezone.utc) - timedelta(hours=1)
+
+
+def _is_repeated_local_hour(ts_utc: datetime) -> bool:
+    local = ts_utc.astimezone(_LOCAL_TZ)
+    return local.replace(fold=1 - local.fold).utcoffset() != local.utcoffset()
+
+
+def _hourly_points(
+    rows: list[dict[str, Any]], value_key: str
+) -> list[tuple[datetime, float]]:
+    """[(local aware hour start, kWh)] in time order, one point per hour.
+
+    Rows on the same hour are summed (spring placeholder); the autumn hour
+    without a row gets 0 so the statistic has no gap.
+    """
+    # Keyed by UTC: aware datetimes sharing a tzinfo compare by wall clock.
+    by_hour: dict[datetime, float] = {}
+    for r in rows:
+        start = _hour_start_utc(r["timestamp"])
+        by_hour[start] = by_hour.get(start, 0.0) + float(r.get(value_key) or 0.0)
+    hours = sorted(by_hour)
+    for prev, cur in pairwise(hours):
+        missing = prev + timedelta(hours=1)
+        if cur - prev == timedelta(hours=2) and _is_repeated_local_hour(missing):
+            by_hour[missing] = 0.0
+    return [(h.astimezone(_LOCAL_TZ), by_hour[h]) for h in sorted(by_hour)]
 
 
 def _rewrite_start(
-    points: list[tuple[datetime, dict[str, Any]]],
+    points: list[tuple[datetime, float]],
     last_sum: float,
     last_start: datetime | None,
     days: dict[date, tuple[float, float]],
@@ -165,30 +202,34 @@ class StatsImporter:
         """
         last_sum, last_start = self._state.stats_anchor(statistic_id)
         days = self._state.stats_checkpoints(statistic_id)
-        points = sorted(((_local(r["timestamp"]), r) for r in rows), key=lambda p: p[0])
+        points = _hourly_points(rows, value_key)
         if not points:
             return
 
         full_reimport = False
         start_idx: int | None = None
         running = 0.0
+        prices: dict[date, float] = {}
         if last_start is not None and self._state.full_reimport_pending(statistic_id):
-            base = await self._full_reimport_base(statistic_id, points, last_start, unit)
+            base = await self._full_reimport_base(statistic_id, points, last_start)
             if base is not None:
-                full_reimport, start_idx, running, days = True, 0, base, {}
+                # Old checkpoint sums predate the rewrite: keep only their
+                # prices; a checkpoint is stored again only when recomputed.
+                full_reimport, start_idx, running = True, 0, base
+                prices, days = {d: f for d, (_, f) in days.items()}, {}
         if start_idx is None:
             start_idx, running = _rewrite_start(points, last_sum, last_start, days)
         if start_idx is None:
             return
 
         stats: list[dict[str, Any]] = []
-        for ts_local, r in points[start_idx:]:
+        for ts_local, kwh in points[start_idx:]:
             ts_utc = ts_local.astimezone(timezone.utc)
             day = ts_local.date()
             if ts_local.hour == 0:
                 # A revised day keeps the price it was first imported with.
-                days[day] = (running, days[day][1] if day in days else factor)
-            v = float(r.get(value_key) or 0.0) * (days[day][1] if day in days else factor)
+                days[day] = (running, days[day][1] if day in days else prices.get(day, factor))
+            v = kwh * (days[day][1] if day in days else prices.get(day, factor))
             running += v
             stats.append({"start": ts_utc.isoformat(), "state": v, "sum": running})
         latest_ts = points[-1][0].astimezone(timezone.utc)
@@ -223,27 +264,29 @@ class StatsImporter:
     async def _full_reimport_base(
         self,
         statistic_id: str,
-        points: list[tuple[datetime, dict[str, Any]]],
+        points: list[tuple[datetime, float]],
         last_start: datetime,
-        unit: str,
     ) -> float | None:
         """Sum before the first row for the one-time re-import, or None to skip it.
 
-        Statistics written by eon_pl <= 1.3.0 may hold provisional values; they
-        are rewritten once from a fetch that starts on 1 January (first fetch
-        after start) and reaches the anchor. The base is taken from HA's own row
-        for that first hour, so the rewrite joins older history without a jump.
+        Statistics written by eon_pl <= 1.3.0 may hold provisional values, and
+        by <= 1.3.1 misplaced DST hours (kWh and cost alike); they are rewritten
+        once from a fetch that reaches the anchor and starts on 1 January (first
+        fetch after start) or at HA's first hour of the statistic (data begin
+        later in the year). The base is taken from HA's own row for that first
+        hour, so the rewrite joins older history without a jump.
         """
-        if unit != "kWh":
-            # Cost sums keep their documented semantics (a price change affects
-            # only new hours), so they are not rewritten.
-            self._state.clear_full_reimport(statistic_id)
-            return None
         first, last = points[0][0], points[-1][0]
-        if (first.month, first.day, first.hour) != (1, 1, 0) or last < last_start:
+        if last < last_start:
             return None
         first_utc = first.astimezone(timezone.utc)
         ok, row = await self._ws_hour_stat(statistic_id, first_utc)
+        if ok and row is not None and (first.month, first.day, first.hour) != (1, 1, 0):
+            # Not a year-start fetch: rewrite only when HA holds nothing older
+            # (otherwise the older hours would stay unrepaired: wait).
+            ok, older = await self._ws_hour_stat(statistic_id, first_utc - timedelta(hours=1))
+            if ok and older is not None:
+                return None
         if not ok:
             _LOGGER.warning("%s: HA statistics unavailable — one-time re-import "
                             "postponed to the next start", statistic_id)

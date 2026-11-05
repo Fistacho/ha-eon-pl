@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from itertools import pairwise
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -320,7 +321,10 @@ async def test_legacy_kwh_history_is_reimported_once_from_year_start(
     imp, ws = _importer(state, monkeypatch, price_import_pln_kwh=2.0)
     # HA's first hour of the year: sum 10.7 incl. state 0.7, so 10.0 came
     # before it (older history); the rewrite must continue from it, not from 0.
-    hour_stat = FakeHourStat({IMPORTED: {"state": 0.7, "sum": 10.7}})
+    hour_stat = FakeHourStat({
+        IMPORTED: {"state": 0.7, "sum": 10.7},
+        IMPORTED_COST: {"state": 1.4, "sum": 6.4},
+    })
     monkeypatch.setattr(imp, "_ws_hour_stat", hour_stat, raising=False)
 
     rows = _day_rows(1, [1.0, 1.0, 1.0]) + _day_rows(2, [2.0, 2.0, 2.0])
@@ -333,9 +337,11 @@ async def test_legacy_kwh_history_is_reimported_once_from_year_start(
     ]
     assert [s["sum"] for s in kwh] == pytest.approx([11.0, 12.0, 13.0, 15.0, 17.0, 19.0])
     assert state.stats_anchor(IMPORTED) == (pytest.approx(19.0), _utc_at(2, 2))
-    # Cost statistics are not rewritten (price semantics: only new hours).
-    assert IMPORTED_COST not in calls
-    assert state.stats_anchor(IMPORTED_COST) == (pytest.approx(555.0), _utc_at(2, 2))
+    # Cost statistics are rewritten too (eon_pl <= 1.3.1 misplaced their DST
+    # hours as well), at the current price, from HA's own base (5.0).
+    _, cost = calls[IMPORTED_COST]
+    assert [s["sum"] for s in cost] == pytest.approx([7.0, 9.0, 11.0, 15.0, 19.0, 23.0])
+    assert state.stats_anchor(IMPORTED_COST) == (pytest.approx(23.0), _utc_at(2, 2))
 
     # One-time: survives a restart and does not repeat.
     restarted = StateStore(str(tmp_path))
@@ -353,11 +359,14 @@ async def test_legacy_reimport_waits_for_a_year_start_fetch(tmp_path, monkeypatc
     hour_stat = FakeHourStat({IMPORTED: {"state": 1.0, "sum": 1.0}})
     monkeypatch.setattr(imp, "_ws_hour_stat", hour_stat, raising=False)
 
-    # Incremental window (does not start on 1 January): history stays as is.
+    # Incremental window (does not start on 1 January, HA holds older hours):
+    # history stays as is; HA is only read, to see that older hours exist.
     await imp.import_hourly(
         {f"ku_{PPE}": _day_rows(10, [1.0, 1.0, 1.0]) + _day_rows(11, [1.0, 1.0, 1.0])}
     )
-    assert hour_stat.asked == []
+    assert hour_stat.asked == [
+        (IMPORTED, _utc_at(10, 0)), (IMPORTED, _utc_at(10, 0) - timedelta(hours=1))
+    ]
     assert IMPORTED not in ws.by_id()
     assert state.full_reimport_pending(IMPORTED)
 
@@ -375,3 +384,242 @@ async def test_legacy_reimport_is_retried_when_ha_cannot_answer(tmp_path, monkey
     assert IMPORTED not in ws.by_id()
     assert state.stats_anchor(IMPORTED) == (pytest.approx(999.0), _utc_at(2, 2))
     assert state.full_reimport_pending(IMPORTED)
+
+
+# ---- DST days ----
+#
+# The OZE report always has 24 rows per day, each labelled by the local hour
+# it ENDS at (1..24). Checked against live data (sensor.total_yield vs
+# exported, 2026): summer hours are CEST, winter hours CET. On the spring day
+# the row ending at the non-existent 02:00 is a zero placeholder; on the
+# autumn day the repeated hour has no row.
+
+
+def _oze_csv(day: str, values: list[float]) -> bytes:
+    """OZE report CSV for one day: rows labelled 1..24 (local hour end)."""
+    lines = ["Data;Godzina;Pobrana;Jedn.;Wprowadzona;Jedn.;Bilans;Jedn."]
+    for label, v in enumerate(values, start=1):
+        num = f"{v:.3f}".replace(".", ",")
+        lines.append(f"{day};{label}:00;{num};kWh;0,000;kWh;{num};kWh")
+    return "\n".join(lines).encode("utf-8")
+
+
+def _utc_hours(first: datetime, n: int) -> list[str]:
+    return [(first + timedelta(hours=i)).isoformat() for i in range(n)]
+
+
+def _assert_consistent(stats: list[dict[str, Any]]) -> None:
+    for prev, cur in pairwise(stats):
+        assert cur["sum"] - prev["sum"] == pytest.approx(cur["state"])
+
+
+async def test_spring_dst_day_one_row_per_hour(state, monkeypatch):
+    from src.api import parse_oze_csv
+
+    imp, ws = _importer(state, monkeypatch, price_import_pln_kwh=2.0)
+    # Label 2 (ends at the non-existent 02:00) is the portal's zero placeholder.
+    values = [1.0, 0.0, 2.0, 3.0] + [1.0] * 20
+    await imp.import_hourly({f"ku_{PPE}": parse_oze_csv(_oze_csv("29.03.2026", values))})
+
+    for sid, factor in ((IMPORTED, 1.0), (IMPORTED_COST, 2.0)):
+        _, stats = ws.by_id()[sid]
+        # 23-hour day: 28.03 23:00Z .. 29.03 21:00Z, each hour exactly once.
+        assert [s["start"] for s in stats] == _utc_hours(
+            datetime(2026, 3, 28, 23, tzinfo=timezone.utc), 23
+        )
+        assert [s["state"] for s in stats] == pytest.approx(
+            [factor * v for v in [1.0, 2.0, 3.0] + [1.0] * 20]
+        )
+        _assert_consistent(stats)
+        assert stats[-1]["sum"] == pytest.approx(factor * sum(values))
+
+
+async def test_autumn_dst_day_has_no_gap(state, monkeypatch):
+    from src.api import parse_oze_csv
+
+    imp, ws = _importer(state, monkeypatch)
+    values = [1.0, 2.0, 3.0, 4.0] + [1.0] * 20
+    await imp.import_hourly({f"ku_{PPE}": parse_oze_csv(_oze_csv("25.10.2026", values))})
+
+    _, stats = ws.by_id()[IMPORTED]
+    # 25-hour day: 24.10 22:00Z .. 25.10 22:00Z, each hour exactly once.
+    assert [s["start"] for s in stats] == _utc_hours(
+        datetime(2026, 10, 24, 22, tzinfo=timezone.utc), 25
+    )
+    # Label 4 (03:00-04:00 CET = 02:00Z) matches PV production, so label 3
+    # is 02:00-03:00 CET (01:00Z); the repeated CEST hour (00:00Z) has no row.
+    assert [s["state"] for s in stats] == pytest.approx(
+        [1.0, 2.0, 0.0, 3.0, 4.0] + [1.0] * 20
+    )
+    _assert_consistent(stats)
+    assert state.stats_anchor(IMPORTED) == (
+        pytest.approx(sum(values)), datetime(2026, 10, 25, 22, tzinfo=timezone.utc)
+    )
+
+
+async def test_state_from_1_3_1_rewrites_dst_hours_once_incl_cost(tmp_path, monkeypatch):
+    from src.api import parse_oze_csv
+
+    # state.json as written by eon_pl 1.3.1 (version 2, nothing pending).
+    anchor = datetime(2026, 3, 29, 21, tzinfo=timezone.utc)
+    (tmp_path / "state.json").write_text(json.dumps({
+        "stats_version": 2,
+        "stats_full_reimport": [],
+        "stats": {
+            sid: {"last_sum": 99.0, "last_start": anchor.isoformat(), "days": {}}
+            for sid in (IMPORTED, IMPORTED_COST)
+        },
+    }))
+    state = StateStore(str(tmp_path))
+    assert state.full_reimport_pending(IMPORTED)
+    assert state.full_reimport_pending(IMPORTED_COST)
+
+    imp, ws = _importer(state, monkeypatch, price_import_pln_kwh=2.0)
+    hour_stat = FakeHourStat({
+        IMPORTED: {"state": 1.0, "sum": 11.0},       # 10.0 before 1 January
+        IMPORTED_COST: {"state": 2.0, "sum": 7.0},   # 5.0 before 1 January
+    })
+    monkeypatch.setattr(imp, "_ws_hour_stat", hour_stat, raising=False)
+    values = [1.0, 0.0, 2.0, 3.0] + [1.0] * 20
+    rows = parse_oze_csv(_oze_csv("01.01.2026", [1.0] * 24)) + parse_oze_csv(
+        _oze_csv("29.03.2026", values)
+    )
+    await imp.import_hourly({f"ku_{PPE}": rows})
+
+    for sid, base, factor in ((IMPORTED, 10.0, 1.0), (IMPORTED_COST, 5.0, 2.0)):
+        _, stats = ws.by_id()[sid]
+        starts = [s["start"] for s in stats]
+        assert len(starts) == len(set(starts)) == 24 + 23
+        assert stats[0]["sum"] == pytest.approx(base + factor * 1.0)
+        assert stats[-1]["sum"] == pytest.approx(base + factor * (24 + sum(values)))
+        _assert_consistent(stats[24:])
+        assert not state.full_reimport_pending(sid)
+
+    # One-time: a restart does not repeat it.
+    assert not StateStore(str(tmp_path)).full_reimport_pending(IMPORTED_COST)
+
+
+async def test_dst_repair_keeps_checkpoint_price_of_revisable_days(tmp_path, monkeypatch):
+    # Day 2 was imported by 1.3.1 at 2.0 PLN/kWh; the price is 3.0 now.
+    (tmp_path / "state.json").write_text(json.dumps({
+        "stats_version": 2,
+        "stats": {IMPORTED_COST: {
+            "last_sum": 99.0, "last_start": _utc_at(2, 1).isoformat(),
+            "days": {"2026-01-02": [50.0, 2.0]},
+        }},
+    }))
+    state = StateStore(str(tmp_path))
+    imp, ws = _importer(state, monkeypatch, price_import_pln_kwh=3.0)
+    hour_stat = FakeHourStat({IMPORTED_COST: {"state": 3.0, "sum": 3.0}})
+    monkeypatch.setattr(imp, "_ws_hour_stat", hour_stat, raising=False)
+
+    await imp.import_hourly(
+        {f"ku_{PPE}": _day_rows(1, [1.0, 1.0]) + _day_rows(2, [1.0, 1.0])}
+    )
+
+    _, cost = ws.by_id()[IMPORTED_COST]
+    assert [s["state"] for s in cost] == pytest.approx([3.0, 3.0, 2.0, 2.0])
+    assert [s["sum"] for s in cost] == pytest.approx([3.0, 6.0, 8.0, 10.0])
+    assert state.stats_checkpoints(IMPORTED_COST)[date(2026, 1, 2)] == pytest.approx((6.0, 2.0))
+
+
+async def test_january_update_never_persists_an_uncomputed_checkpoint(tmp_path, monkeypatch):
+    # 1.3.1 state on 10.01.2027: checkpoints reach back into December 2026.
+    sum_before = {date(2026, 12, 9) + timedelta(days=i): 1000.0 + 24 * i for i in range(31)}
+    last_start = datetime(2027, 1, 8, 23, tzinfo=WARSAW).astimezone(timezone.utc)
+    (tmp_path / "state.json").write_text(json.dumps({
+        "stats_version": 2,
+        "stats": {IMPORTED: {
+            "last_sum": 1000.0 + 24 * 31, "last_start": last_start.isoformat(),
+            "days": {d.isoformat(): [s, 1.0] for d, s in sum_before.items()},
+        }},
+    }))
+    state = StateStore(str(tmp_path))
+    imp, ws = _importer(state, monkeypatch)
+    jan1 = sum_before[date(2027, 1, 1)]
+    monkeypatch.setattr(imp, "_ws_hour_stat",
+                        FakeHourStat({IMPORTED: {"state": 1.0, "sum": jan1 + 1.0}}), raising=False)
+
+    def days(first: date, n: int) -> list[dict[str, Any]]:
+        return [
+            {"timestamp": datetime.combine(first + timedelta(days=i), datetime.min.time())
+             + timedelta(hours=h), "imported_kwh": 1.0, "exported_kwh": 0.0}
+            for i in range(n) for h in range(24)
+        ]
+
+    # First fetch after the update: 1..8 January (one-time re-import).
+    await imp.import_hourly({f"ku_{PPE}": days(date(2027, 1, 1), 8)})
+    assert not state.full_reimport_pending(IMPORTED)
+    # Only days rewritten by this import keep a checkpoint, each with its real sum.
+    assert state.stats_checkpoints(IMPORTED) == {
+        date(2027, 1, 1) + timedelta(days=i): (pytest.approx(jan1 + 24 * i), 1.0)
+        for i in range(8)
+    }
+
+    # Next fetch (window reaches back into December): sums must follow HA's.
+    ws.calls.clear()
+    await imp.import_hourly({f"ku_{PPE}": days(date(2026, 12, 9), 31)})
+    _, stats = ws.by_id()[IMPORTED]
+    assert stats[0]["start"] == datetime(2027, 1, 1, tzinfo=WARSAW).astimezone(timezone.utc).isoformat()
+    assert stats[0]["sum"] == pytest.approx(jan1 + 1.0)
+    assert stats[-1]["sum"] == pytest.approx(jan1 + 24 * 8)
+
+
+class FakeHourStatByStart:
+    def __init__(self, rows: dict[datetime, dict[str, float]]):
+        self.rows = rows
+
+    async def __call__(self, statistic_id: str, start: datetime):
+        return True, self.rows.get(start)
+
+
+async def test_dst_repair_of_a_contract_starting_mid_year(tmp_path, monkeypatch):
+    # Portal (and HA) data begin on 1 March: a complete fetch that cannot start
+    # on 1 January must still run the one-time re-import, not wait forever.
+    state = _legacy_state(tmp_path, {IMPORTED: (999.0, _utc_at(2, 1, month=3))})
+    imp, ws = _importer(state, monkeypatch)
+    monkeypatch.setattr(imp, "_ws_hour_stat", FakeHourStatByStart(
+        {_utc_at(1, 0, month=3): {"state": 4.0, "sum": 4.0}}), raising=False)
+
+    await imp.import_hourly(
+        {f"ku_{PPE}": _day_rows(1, [1.0, 1.0], month=3) + _day_rows(2, [2.0, 2.0], month=3)}
+    )
+
+    _, stats = ws.by_id()[IMPORTED]
+    assert [s["sum"] for s in stats] == pytest.approx([1.0, 2.0, 4.0, 6.0])
+    assert not state.full_reimport_pending(IMPORTED)
+
+
+async def test_legacy_reimport_waits_when_year_start_fetch_misses_anchor(
+    tmp_path, monkeypatch
+):
+    # Fetch starts on 1 January but ends before the anchor (5 January): the
+    # rewritten sums would not reach later hours, so nothing is imported yet.
+    state = _legacy_state(tmp_path, {IMPORTED: (999.0, _utc_at(5, 2))})
+    imp, ws = _importer(state, monkeypatch)
+    hour_stat = FakeHourStat({IMPORTED: {"state": 1.0, "sum": 11.0}})
+    monkeypatch.setattr(imp, "_ws_hour_stat", hour_stat, raising=False)
+
+    await imp.import_hourly(
+        {f"ku_{PPE}": _day_rows(1, [1.0, 1.0, 1.0]) + _day_rows(2, [2.0, 2.0, 2.0])}
+    )
+
+    assert hour_stat.asked == []
+    assert IMPORTED not in ws.by_id()
+    assert state.stats_anchor(IMPORTED) == (pytest.approx(999.0), _utc_at(5, 2))
+    assert state.full_reimport_pending(IMPORTED)
+
+
+async def test_missing_hour_on_an_ordinary_day_is_not_filled(state, monkeypatch):
+    # Only the repeated autumn DST hour is padded with 0; a gap on any other
+    # day (here July, hour 05:00-06:00 local missing) stays a gap.
+    imp, ws = _importer(state, monkeypatch)
+    rows = [r for r in _day_rows(15, [1.0] * 24, month=7) if r["timestamp"].hour != 5]
+
+    await imp.import_hourly({f"ku_{PPE}": rows})
+
+    _, stats = ws.by_id()[IMPORTED]
+    starts = [s["start"] for s in stats]
+    assert len(starts) == 23
+    assert _utc_at(15, 5, month=7).isoformat() not in starts
+    assert stats[-1]["sum"] == pytest.approx(23.0)

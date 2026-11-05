@@ -172,6 +172,7 @@ Dla stawek z tabeli: `0,8 × (0,5000 + 0,3000 + 0,0300) × 1,23 = 0,81672` → w
 - **Opłaty stałe nie są wliczone** (handlowa, sieciowa stała, przejściowa, abonamentowa, mocowa ryczałtowa) — statystyki liczą tylko część zależną od kWh.
 - **Zmiana ceny działa tylko na nowe godziny.** Sumy już zaimportowane nie są przeliczane — od momentu zmiany kolejne godziny są doliczane po nowej cenie do dotychczasowej sumy. Każda statystyka (kWh i PLN) ma własną kotwicę sumy, więc włączenie ceny nie wpływa na statystyki kWh.
 - Po pierwszym włączeniu ceny (zapis opcji = restart addonu) pierwszy fetch pobiera dane od 1 stycznia bieżącego roku, więc koszt zostanie policzony wstecz po bieżącej cenie.
+- Wyjątek: aktualizacja do 1.3.2 jednorazowo przelicza od 1 stycznia wszystkie statystyki (kWh i PLN), żeby poprawić godziny dni zmiany czasu (marzec: zdublowana godzina, październik: brakująca). Koszt dni starszych niż 30 dni liczony jest wtedy po bieżącej cenie.
 - Taryfy wielostrefowe (G12, G12w…) — jedna cena dla wszystkich godzin, więc wpisz średnią ważoną albo traktuj wynik jako szacunek.
 
 ## Troubleshooting

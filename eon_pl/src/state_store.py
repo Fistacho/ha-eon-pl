@@ -12,8 +12,10 @@ _LOGGER = logging.getLogger(__name__)
 
 # 1 (implicit, eon_pl <= 1.3.0): anchors only. Statistics written by it may
 # hold provisional portal values that were never revised.
-# 2: anchors + per-day checkpoints for re-importing revised days.
-STATS_STATE_VERSION = 2
+# 2 (eon_pl 1.3.1): anchors + per-day checkpoints for re-importing revised
+# days. Statistics written by <= 1.3.1 hold misplaced hours on DST days.
+# 3: DST days imported one row per hour.
+STATS_STATE_VERSION = 3
 
 
 class StateStore:
@@ -25,7 +27,7 @@ class StateStore:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Mark statistics written by version 1 for one full re-import.
+        """Mark statistics written by an older version for one full re-import.
 
         Persisted with the next save; repeating it before then is harmless.
         """
