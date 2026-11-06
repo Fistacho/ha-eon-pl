@@ -96,3 +96,10 @@ def configure_logging(level: str) -> None:
         level=levels.get(level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # httpx logs every request URL at INFO, and the portal API takes the
+    # customer numbers (ku=, ppe=) as query parameters.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    # aiomqtt passes logging.getLogger("mqtt") to paho, which at DEBUG logs
+    # every PUBLISH with its topic, and the topics contain eon_pl_{KU}_{PPE}.
+    logging.getLogger("mqtt").setLevel(logging.INFO)

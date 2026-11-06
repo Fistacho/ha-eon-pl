@@ -21,7 +21,7 @@
 
 ## Wymagania
 
-- Home Assistant OS / Supervised z dostępem do Add-on Store
+- Home Assistant OS / Supervised z dostępem do Add-on Store, **Home Assistant 2025.11 lub nowszy**
 - **MQTT broker** (np. addon Mosquitto) — addon korzysta z auto-discovery
 - Konto na <https://eon.pl/mojeon>
 

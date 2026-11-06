@@ -1,5 +1,5 @@
 name: E.ON Polska
-version: "1.3.2"
+version: "1.3.3"
 slug: eon_pl
 description: "Nieoficjalny scraper Mój E.ON (automatyzacja przeglądarki, nie jest to integracja API) do Home Assistant Energy Dashboard. Login email+hasło, MQTT auto-discovery, hourly statistics."
 url: https://github.com/Fistacho/ha-eon-pl
@@ -10,6 +10,9 @@ init: false
 startup: services
 hassio_api: true
 homeassistant_api: true
+# recorder/import_statistics przyjmuje mean_type i unit_class od HA 2025.11.0;
+# starsze HA odrzucają te pola (a 2026.11 ostrzega, gdy ich brak).
+homeassistant: "2025.11.0"
 
 services:
   - mqtt:want

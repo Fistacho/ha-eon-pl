@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, timedelta, timezone
 from itertools import pairwise
 from typing import Any
@@ -73,12 +74,15 @@ async def test_cost_is_kwh_times_price_with_running_sum(state, monkeypatch):
     assert set(calls) == {IMPORTED, EXPORTED, IMPORTED_COST, EXPORTED_COMP}
 
     meta, stats = calls[IMPORTED_COST]
+    # HA >= 2025.11 metadata: mean_type (0 = no mean) replaces has_mean;
+    # unit_class None = PLN has no unit converter.
     assert meta == {
-        "has_mean": False,
+        "mean_type": 0,
         "has_sum": True,
         "name": f"E.ON Polska — koszt poboru {PPE}",
         "source": "eon_pl",
         "statistic_id": IMPORTED_COST,
+        "unit_class": None,
         "unit_of_measurement": "PLN",
     }
     assert [s["start"] for s in stats] == [_utc(h).isoformat() for h in (0, 1, 2)]
@@ -88,13 +92,16 @@ async def test_cost_is_kwh_times_price_with_running_sum(state, monkeypatch):
     meta, stats = calls[EXPORTED_COMP]
     assert meta["name"] == f"E.ON Polska — wartość oddanej {PPE}"
     assert meta["unit_of_measurement"] == "PLN"
-    assert meta["has_sum"] is True and meta["has_mean"] is False
+    assert meta["has_sum"] is True and meta["mean_type"] == 0
+    assert meta["unit_class"] is None
     assert [s["state"] for s in stats] == pytest.approx([0.0, 0.8, 0.4])
     assert [s["sum"] for s in stats] == pytest.approx([0.0, 0.8, 1.2])
 
     # kWh statistics stay untouched by the price (multiplier 1, unit kWh).
     meta, stats = calls[IMPORTED]
     assert meta["unit_of_measurement"] == "kWh"
+    assert meta["unit_class"] == "energy" and meta["mean_type"] == 0
+    assert "has_mean" not in meta  # deprecated in HA, replaced by mean_type
     assert [s["sum"] for s in stats] == pytest.approx([1.0, 1.5, 3.5])
 
     assert state.stats_anchor(IMPORTED_COST) == (pytest.approx(3.85), _utc(2))
@@ -623,3 +630,71 @@ async def test_missing_hour_on_an_ordinary_day_is_not_filled(state, monkeypatch)
     assert len(starts) == 23
     assert _utc_at(15, 5, month=7).isoformat() not in starts
     assert stats[-1]["sum"] == pytest.approx(23.0)
+
+
+# ---- log privacy ----
+#
+# PPE (and KU) are personal data; the add-on log is often pasted into issues.
+# Logs show only their last 4 digits; statistic_id itself is unchanged.
+
+
+def _assert_ppe_masked(caplog) -> None:
+    assert caplog.records
+    assert PPE not in caplog.text
+    assert PPE[-4:] in caplog.text
+
+
+async def test_import_logs_mask_ppe(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    # IMPORTED takes the one-time re-import path, EXPORTED the regular one.
+    state = _legacy_state(tmp_path, {IMPORTED: (999.0, _utc_at(2, 2))})
+    imp, ws = _importer(state, monkeypatch)
+    hour_stat = FakeHourStat({IMPORTED: {"state": 1.0, "sum": 1.0}})
+    monkeypatch.setattr(imp, "_ws_hour_stat", hour_stat, raising=False)
+
+    await imp.import_hourly(
+        {f"ku_{PPE}": _day_rows(1, [1.0, 1.0, 1.0]) + _day_rows(2, [2.0, 2.0, 2.0])}
+    )
+
+    assert set(ws.by_id()) == {IMPORTED, EXPORTED}  # ids keep the full PPE
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("One-time re-import of") for m in messages)
+    assert any(m.startswith("Imported 6 rows for") for m in messages)
+    _assert_ppe_masked(caplog)
+
+
+async def test_import_failure_logs_mask_ppe(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    state = _legacy_state(tmp_path, {IMPORTED: (999.0, _utc_at(2, 2))})
+    imp = StatsImporter("http://ha:8123", "token", state)
+
+    async def failing_ws_call(command):
+        # HA error texts may echo the statistic_id back.
+        sid = (command.get("statistic_ids") or [command.get("metadata", {}).get("statistic_id")])[0]
+        return False, json.dumps({"code": "invalid_format", "message": f"bad {sid}"})
+
+    monkeypatch.setattr(imp, "_ws_call", failing_ws_call)
+
+    await imp.import_hourly(
+        {f"ku_{PPE}": _day_rows(1, [1.0, 1.0, 1.0]) + _day_rows(2, [2.0, 2.0, 2.0])}
+    )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("statistics_during_period") for m in messages)
+    assert any("HA statistics unavailable" in m for m in messages)
+    assert any(m.startswith("import_statistics") for m in messages)
+    _assert_ppe_masked(caplog)
+
+
+async def test_skipped_reimport_log_masks_ppe(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    state = _legacy_state(tmp_path, {IMPORTED: (999.0, _utc_at(2, 2))})
+    imp, _ = _importer(state, monkeypatch)
+    monkeypatch.setattr(imp, "_ws_hour_stat", FakeHourStat({}), raising=False)
+
+    await imp.import_hourly(
+        {f"ku_{PPE}": _day_rows(1, [1.0, 1.0, 1.0]) + _day_rows(2, [2.0, 2.0, 2.0])}
+    )
+
+    assert any("one-time re-import skipped" in r.getMessage() for r in caplog.records)
+    _assert_ppe_masked(caplog)

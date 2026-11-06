@@ -17,6 +17,7 @@ from .const import (
     STATS_REPORT_MAX_DAYS,
     STATS_REVISION_DAYS,
 )
+from .redact import redact
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +64,8 @@ class EonCoordinator:
         except EonAuthError as exc:
             if not self._relogin:
                 raise
-            _LOGGER.warning("%s: auth failed (%s) — re-login via Playwright", what, exc)
+            _LOGGER.warning("%s: auth failed (%s) — re-login via Playwright",
+                            redact(what), redact(exc))
             new_cookie = await self._relogin()
             self._client.set_cookie(new_cookie)
             return await fn()
@@ -115,7 +117,7 @@ class EonCoordinator:
                             what=f"billing[{key}]",
                         )
                     except (EonApiError, EonAuthError) as exc:
-                        _LOGGER.warning("Billing unavailable for %s: %s", key, exc)
+                        _LOGGER.warning("Billing unavailable for %s: %s", redact(key), redact(exc))
 
                     if self.ph.get("HasOze"):
                         try:
@@ -124,7 +126,7 @@ class EonCoordinator:
                                 what=f"oze[{key}]",
                             )
                         except (EonApiError, EonAuthError) as exc:
-                            _LOGGER.warning("OZE unavailable for %s: %s", key, exc)
+                            _LOGGER.warning("OZE unavailable for %s: %s", redact(key), redact(exc))
 
                     try:
                         cd["meter"] = await self._with_relogin(
@@ -132,7 +134,7 @@ class EonCoordinator:
                             what=f"meter[{key}]",
                         )
                     except (EonApiError, EonAuthError) as exc:
-                        _LOGGER.debug("Meter unavailable for %s: %s", key, exc)
+                        _LOGGER.debug("Meter unavailable for %s: %s", redact(key), redact(exc))
 
                     rows = await self._fetch_hourly(ku_id, ppe_id)
                     if rows:
@@ -182,14 +184,14 @@ class EonCoordinator:
                 )
             except EonAuthError as exc:
                 if attempt == 1:
-                    _LOGGER.info("hourly: dropped session (%s) — retry", exc)
+                    _LOGGER.info("hourly: dropped session (%s) — retry", redact(exc))
                     continue
                 _LOGGER.warning("hourly unavailable for %s (%s..%s): %s",
-                                ppe_id, date_from, date_to, exc)
+                                redact(ppe_id), date_from, date_to, redact(exc))
                 return None
             except EonApiError as exc:
                 _LOGGER.warning("hourly error for %s (%s..%s): %s",
-                                ppe_id, date_from, date_to, exc)
+                                redact(ppe_id), date_from, date_to, redact(exc))
                 return None
         return None
 

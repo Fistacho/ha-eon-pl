@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .const import DOMAIN, STATS_REVISION_DAYS
+from .redact import redact
 from .state_store import StateStore
 
 # eon.pl publishes hourly readings stamped in Polish local time. Convert to
@@ -234,17 +235,22 @@ class StatsImporter:
             stats.append({"start": ts_utc.isoformat(), "state": v, "sum": running})
         latest_ts = points[-1][0].astimezone(timezone.utc)
 
+        # HA >= 2025.11 schema; HA 2026.11 warns when mean_type or unit_class
+        # is missing. mean_type 0 = no mean; unit_class "energy" lets HA
+        # convert kWh, PLN has no converter (None).
         metadata = {
-            "has_mean": False,
+            "mean_type": 0,
             "has_sum": True,
             "name": name,
             "source": DOMAIN,
             "statistic_id": statistic_id,
+            "unit_class": "energy" if unit == "kWh" else None,
             "unit_of_measurement": unit,
         }
         ok, err = await self._ws_import(metadata, stats)
         if not ok:
-            _LOGGER.warning("import_statistics %s failed: %s", statistic_id, err)
+            _LOGGER.warning("import_statistics %s failed: %s",
+                            redact(statistic_id), redact(err))
             return
 
         keep_from = points[-1][0].date() - timedelta(days=STATS_REVISION_DAYS)
@@ -257,9 +263,9 @@ class StatsImporter:
         if full_reimport:
             self._state.clear_full_reimport(statistic_id)
             _LOGGER.warning("One-time re-import of %s from %s done (%d rows)",
-                            statistic_id, points[0][0].date(), len(stats))
+                            redact(statistic_id), points[0][0].date(), len(stats))
         _LOGGER.info("Imported %d rows for %s (running sum=%.3f)",
-                     len(stats), statistic_id, running)
+                     len(stats), redact(statistic_id), running)
 
     async def _full_reimport_base(
         self,
@@ -289,11 +295,11 @@ class StatsImporter:
                 return None
         if not ok:
             _LOGGER.warning("%s: HA statistics unavailable — one-time re-import "
-                            "postponed to the next start", statistic_id)
+                            "postponed to the next start", redact(statistic_id))
             return None
         if row is None:
             _LOGGER.warning("%s: HA has no hour %s — one-time re-import skipped",
-                            statistic_id, first_utc.isoformat())
+                            redact(statistic_id), first_utc.isoformat())
             self._state.clear_full_reimport(statistic_id)
             return None
         return row["sum"] - row["state"]
@@ -311,7 +317,8 @@ class StatsImporter:
             "statistic_ids": [statistic_id],
         })
         if not ok:
-            _LOGGER.warning("statistics_during_period %s failed: %s", statistic_id, result)
+            _LOGGER.warning("statistics_during_period %s failed: %s",
+                            redact(statistic_id), redact(result))
             return False, None
         return _parse_hour_stat(result, statistic_id, start)
 
